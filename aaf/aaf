@@ -74,6 +74,7 @@ Options:
   -F pat   format columns according to format string <pat> with keys
             - l = left-justified (default)
             - r = right-justified
+            - c = centered
            (additional columns take the last specified format, so you can use e.g. "-F r"
            to right-justify all columns, or "-F rl" to right-justify the first column only)
   -s       split on whitespace (rather than single TABs)
@@ -88,8 +89,8 @@ Options:
 
 USAGE
 
-die "Error: only 'l' and 'r' characters are allowed in -F (you wrote: -F $Format)\n"
-  unless $Format =~ /^[lr]+$/;
+die "Error: only characters 'l', 'r' and 'c' are allowed in -F (you wrote: -F $Format)\n"
+  unless $Format =~ /^[lrc]+$/;
 
 # set various parameters and declare global variables
 our $page_size = ($Paged || $PostScript) ? $Lines : 0;
@@ -235,9 +236,19 @@ sub print_record {
     $col += length $s;
     if ($col < $field_bdry) { 
       my $fill = $field_bdry - $col;                # fill with blanks if necessary
-      print $OUT " " x $fill if $format[$j] eq "r"; # fill here if right-justified
-      print $OUT $s;                                # print field content
-      print $OUT " " x $fill if $format[$j] eq "l"; # fill here if left-justified
+      my $fill_left = 0;
+      my $fill_right = 0;
+      if ($format[$j] eq "c") {
+        $fill_left = int($fill / 2);
+        $fill_right = $fill - $fill_left;
+      }
+      else {
+        $fill_right = $fill if $format[$j] eq "l";
+        $fill_left = $fill if $format[$j] eq "r";
+      }
+      print $OUT " " x $fill_left;
+      print $OUT $s;
+      print $OUT " " x $fill_right;
     }
     else {
       print $OUT substr($s, 0, $width[$j]);         # or cut field content to specified width
