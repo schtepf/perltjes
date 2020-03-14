@@ -1,16 +1,5 @@
 #!/usr/bin/perl -w
 # -*-cperl-*-
-###################################################################
-###                                                             ###
-###    Author: Stefan Evert                                     ###
-###   Purpose: Simple in-place editor for configuration variables##
-###   Created: Mon Dec 12 12:17:24 2005                         ###
-###  Modified: Mon Dec 12 14:17:41 2005 (severt)                ###
-###                                                             ###
-###################################################################
-# 
-# 
-# 
 
 use Config;
 use Getopt::Long;

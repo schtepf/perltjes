@@ -1,16 +1,5 @@
 #!/usr/bin/perl -w
 # -*-cperl-*-
-###################################################################
-###                                                             ###
-###    Author: Stefan Evert                                     ###
-###   Purpose: Extract entries for given LaTeX document from bibliography database
-###   Created: Wed Sep 15 13:30:58 2004                         ###
-###  Modified: Tue Apr 15 00:37:43 2008 (severt)                ###
-###                                                             ###
-###################################################################
-# 
-# 
-# 
 $| = 1;
 
 # use sigtrap 'handler' => sub { die "Signal caught. Exiting.\n" }, qw<normal-signals>;

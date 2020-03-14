@@ -245,6 +245,9 @@ Use the following code snippet to set up command-line completion for HotSync tas
 
 ## Licence
 
+Copyright (C) 2004-2012 by Stefan Evert
+([www.stefan-evert.de](http://www.stefan-evert.de/))
+
 This software is provided AS IS and the author makes no warranty as to
 its use and performance. You may use the program, redistribute and
 modify it under the same terms as Perl itself.
@@ -253,9 +256,6 @@ IN NO EVENT WILL THE AUTHOR BE LIABLE TO YOU FOR ANY CONSEQUENTIAL,
 INCIDENTAL OR SPECIAL DAMAGES, INCLUDING ANY LOST PROFITS OR LOST
 SAVINGS, EVEN IF HE HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES,
 OR FOR ANY CLAIM BY ANY THIRD PARTY.
-
-Copyright (C) 2004-2012 by Stefan Evert
-[http://purl.org/stefan.evert]
 
 
 ## Version history
