@@ -1,0 +1,235 @@
+#!/usr/bin/perl -w
+# -*-cperl-*-
+###################################################################
+###                                                             ###
+###    Author: Stefan Evert                                     ###
+###   Purpose: Convert LaTeX snippet to EPS or bitmap image     ###
+###   Created: Wed Sep 15 13:30:58 2004                         ###
+###  Modified: Thu Jan 13 15:07:48 2005 (evert)                 ###
+###                                                             ###
+###################################################################
+#
+#
+#
+$| = 1;
+
+# use sigtrap 'handler' => sub { die "Signal caught. Exiting.\n" }, qw<normal-signals>;
+
+use FileHandle;
+use Getopt::Long;
+
+$MakeBitmap = 0;         # whether to generate bitmap from .eps as well
+$Scale      = 2;         # scaling factor for bitmap (default: 2)
+$MakePDF    = 0;         # whether to generate .pdf from .eps as well
+$Clean      = 0;         # whether to delete .eps file with -b or -p
+@Libraries  = ();        # additional libraries to load
+$NoDefaults = 0;         # do not load default set of libraries
+$Charset    = "utf8";    # character encoding of input files
+$Debug      = 0;         # show some diagnostics while processing
+$KeepTemp   = 0;         # keep temporary latex files for debugging
+$Help       = 0;         # show help message?
+
+$ok = GetOptions(
+    "bitmap|b"                      => \$MakeBitmap,
+    "scale|s=i"                     => \$Scale,
+    "pdf|p"                         => \$MakePDF,
+    "clean|c"                       => \$Clean,
+    "libraries|libs|l=s"            => \@Libraries,
+    "no-default-libs|no-defaults|n" => \$NoDefaults,
+    "encoding|e=s"                  => \$Charset,
+    "debug|d"                       => \$Debug,
+    "keep-temp|keep|k"              => \$KeepTemp,
+    "help|h"                        => \$Help,
+);
+
+$Clean = 0
+  unless $MakePDF or $MakeBitmap;
+
+die <<'EOT' unless $ok and @ARGV > 0 and not $Help;
+
+Usage:  teximage [options] snippet.tex [snip2.tex ...]
+
+  -b       generate bitmap (.png or .gif) in addition to .eps
+    --bitmap
+  -s <n>   scaling factor for bitmap image (default: 2)
+    --scale=<n>
+  -p       generate .pdf in addition to .eps
+    --pdf
+  -c       do not keep .eps file when -b or -p is specified
+    --clean
+  -l <pkg> load LaTex package <pkg> (may be used repeatedly)
+    --libs=<pkg1>,<pkg2>,...
+  -n       do not load default packages automatically
+    --no-default-libs, --no-defaults
+  -d       show some diagnostics / debug messages
+    --debug
+  -e <enc> input file uses character encoding <enc> (default: utf8)
+    --encoding=<enc>
+  -k       do not delete temporary files (for debugging purposes)
+    --keep-temp, --keep
+  -h       this help message
+    --help
+
+Use special comment lines ``%%PREAMBLE ...'' or ``%%PRE ...''
+in snippet to insert arbitrary latex commands into the preamble
+
+EOT
+
+$TempBase = "teximage.$$";    # basename for temporary files
+
+foreach $file (@ARGV) {
+    print "Processing $file ... ";
+    ($base = $file) =~ s/\.tex$//;
+    $fh = new FileHandle $file
+      or die "Can't read file $file: $!";
+
+    ## construct temporary latex file
+    $tf = new FileHandle "> $TempBase.tex"
+      or die "Can't create temporary file $tf: $!";
+    print $tf $HEADER;
+    print $tf "\\usepackage[$Charset]{inputenc}\n";
+    print $tf $DEFAULTLIBS unless $NoDefaults;
+
+    if (@Libraries) {
+        @Libraries = split /,/, join(",", @Libraries);
+        foreach $lib (@Libraries) {
+            print $tf "\\usepackage{$lib}\n";
+        }
+    }
+    @BODY = ();    # collect lines for body
+    while (<$fh>) {
+        if (s/^\%\%+pre\S*\s+//i) {    # %%PREAMBLE <commands>  ->  put into preamble
+            print $tf $_;
+        }
+        else {
+            push @BODY, $_;
+        }
+    }
+    print $tf $BEGIN;
+    print $tf $_ for @BODY;
+    print $tf $FOOTER;
+
+    ## run latex on the temporary file -> dvi
+    run_command("latex $TempBase.tex");
+    print "dvi ";
+
+    ## run dvips to generate EPS file -> eps
+    run_command("dvips -E -o $base.eps $TempBase.dvi");
+    print(($Clean) ? "[eps] " : "eps ");
+
+    if ($MakePDF) {
+        ## run epstopdf to convert EPD to PDF
+        run_command("epstopdf $base.eps");
+        print "pdf ";
+    }
+    if ($MakeBitmap) {
+        ## run pstoimg to convert EPS to GIF or PNG
+        run_command("pstoimg -antialias -scale $Scale $base.eps");
+        print "img ";
+    }
+
+    if ($Clean) {
+        unlink "$base.eps";
+    }
+    print "\n";
+    cleanup_files()
+      unless $KeepTemp;
+    print "[intermediate files $TempBase.* have not been deleted]\n"
+      if $KeepTemp;
+}
+
+## run a command, catch output (for error messages) and test exit status
+sub run_command {
+    my $cmd      = shift;
+    my $tempfile = "/tmp/teximage.$$.output";
+    my $status   = system "$cmd >$tempfile 2>\&1";
+    if ($status != 0) {
+        my $exit     = $status >> 8;
+        my $messages = "<NO COMMAND OUTPUT>\n";    # slurp messages file into $messages
+        my $fh       = new FileHandle $tempfile;
+        if ($fh) {
+            local $/ = undef;
+            $messages = <$fh>;
+            $fh->close;
+        }
+        unlink $tempfile;
+        if ($exit == 0) {
+            die "\nFailed to execute the following command: $!\n", "\t$cmd\n";
+        }
+        print STDERR "\n\n*** FAIL ***\n\n";
+        print STDERR "$messages\n";
+        print STDERR "Command execution failed (exit status: $exit)\n";
+        print STDERR "\t$cmd\n";
+        die "Aborted.\n";
+    }
+}
+
+## clean up temporary files (after processing each snippet, and automatically on exit)
+sub cleanup_files {
+    if ($TempBase) {
+        my @tempfiles = glob "$TempBase.*";
+        if (@tempfiles) {
+            print "[deleting temporary files]\n"
+              if $Debug;
+            unlink @tempfiles;
+        }
+    }
+}
+
+END {
+    cleanup_files()
+      unless $KeepTemp;
+}
+
+## header & footer for generated latex file
+BEGIN {
+    $HEADER = <<'EOT';
+\nonstopmode
+\documentclass[a4paper]{article}
+
+\usepackage{vmargin}
+\setpapersize[portrait]{A4}			% may add configuration option for other page sizes and landscape mode
+\setmargnohfrb{0mm}{0mm}{0mm}{0mm}		% use full A4 page
+
+\setlength{\parindent}{0mm}
+\setlength{\parskip}{\medskipamount}
+
+\usepackage[french,german,english]{babel}
+EOT
+
+    my $UNUSED = <<'EOT';
+%% may activate these with options for special fonts
+%% \usepackage[T1]{fontenc}
+%% \usepackage{textcomp}
+
+%% \usepackage{mathptmx}
+%% \usepackage{mathpazo}
+%% \usepackage{helvet}
+%% \usepackage{avant}
+%% \usepackage{pifont}
+%% \usepackage{eucal}
+
+%% \usepackage{pslatex}
+%% \renewcommand{\familydefault}{\sfdefault}
+
+%% \usepackage{colortbl}			% not activated because of incompatibility with hhline
+EOT
+
+    $DEFAULTLIBS = <<'EOT';
+%% load default set of add-on packages
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx,rotating}
+\usepackage{array,hhline,booktabs}
+\usepackage{xspace}
+\usepackage{ifthen,calc,hyphenat}
+\usepackage{pgf,pgfarrows,pgfnodes,pgfautomata,pgfheaps,pgfshade,xcolor}
+EOT
+
+    $BEGIN = <<'EOT';
+\begin{document}
+EOT
+
+    $FOOTER = <<'EOT';
+\end{document}
+EOT
+}

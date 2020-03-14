@@ -1,0 +1,255 @@
+#!/usr/bin/perl
+# -*-cperl-*-
+## aaf -- the ASCII auto formatter
+
+use warnings;
+use strict;
+
+use Encode;
+use Getopt::Long qw(:config no_ignore_case bundling);
+use FileHandle;
+
+# command line options (0 = valid option, not set | 1 = option set)
+our $Help = 0;                # -h
+our $Quiet = 0;               # -q
+our $Verbose = 0;             # -v
+our $Widths = "";             # -W <w1>,<w2>,...
+our $Format = "l";            # -F <pattern>
+our $Split = 0;               # -s
+our $Charset = undef;         # -c <encoding>
+our $Paged = 0;               # -p
+our $PostScript = 0;          # -P
+our $Lines = 60;              # -L <n>
+our $Landscape = 0;           # -l
+our $PageHeader = "";         # -H <string>
+our $PrintLabel = "AAF output"; # -N <string>
+our $SingleSided = 0;         # -1
+
+# global configuration settings
+our $a2ps_page_margin = 5;    # lines of margin left at bottom of a2ps page
+
+sub a2ps_call {               # command-line invocation of a2ps + ps2pdf (or similar formatter) for use in pipe
+  my $lines_per_page = $Lines + $a2ps_page_margin;
+  my $cmd = "a2ps -o - -M A4 ";
+  $cmd .= ($Landscape) ? "-1 -r " : "-2 ";
+  $cmd .= "--lines-per-page=$lines_per_page '--center-title=$PrintLabel' ";
+  $cmd .= "-SDuplex:false "
+    if $SingleSided;
+  $cmd .= "| ps2pdf -sPAPERSIZE=a4 - - ";
+  return $cmd;
+}
+
+my $ok = GetOptions(
+  "h" => \$Help,
+  "v" => \$Verbose,
+  "W=s" => \$Widths,
+  "F=s" => \$Format,
+  "s" => \$Split,
+  "c=s" => \$Charset,
+  "H=s" => \$PageHeader,
+  "p" => \$Paged,
+  "L=i" => \$Lines,
+  "P" => \$PostScript,
+  "l" => \$Landscape,
+  "1" => \$SingleSided,
+  "N=s" => \$PrintLabel,
+);
+
+die <<'USAGE' unless $ok and not $Help;
+
+Usage:  aaf [options] <file> [...] | ...
+        ... | aaf [options] | ...
+
+aaf (ASCII auto formatter) is a pipe filter which pretty-prints a TAB-separated table, i.e.
+it replaces the TABs by an appropriate number of blanks so that columns are aligned.
+Column widths are determined automatically unless specified on the command-line (-W option).
+Multiple input files specified on the command line are concatenated into a single table.
+
+Options:
+  -h       print this help page
+  -v       verbose (show progress info)
+  -W n1,n2,...  user-defined column widths (<n1> for first column, <n2> for second, etc.)
+            - negative values indicate fixed width, other columns will automatically be enlarged
+            - if all widths are negative, extra fields in the input will be dropped
+  -F pat   format columns according to format string <pat> with keys
+            - l = left-justified (default)
+            - r = right-justified
+           (additional columns take the last specified format, so you can use e.g. "-F r"
+           to right-justify all columns, or "-F rl" to right-justify the first column only)
+  -s       split on whitespace (rather than single TABs)
+  -c enc   use character encoding <enc> for input and output (e.g. "-c utf8")
+  -H s1,s2,...  display column headers <s1>, <s2>, etc. (e.g. "-H lemma,POS,frequency")
+  -p       paged mode (input is read and formatted in page chunks)
+    -L n       print <n> lines per page (paged mode) [default=60]
+  -P       generate PDF output for printing (implies -p)
+    -l          print one wide page instead of two narrow ones ("landscape" mode)
+    -1          print single-sided (on duplex printers)
+    -N name     show <name> across top of printed pages (as filename)
+
+USAGE
+
+die "Error: only 'l' and 'r' characters are allowed in -F (you wrote: -F $Format)\n"
+  unless $Format =~ /^[lr]+$/;
+
+# set various parameters and declare global variables
+our $page_size = ($Paged || $PostScript) ? $Lines : 0;
+our @column_labels = split /,/, $PageHeader; # empty list = -H not specified
+
+our @field_width = split /,/, $Widths;  # user specified field widths
+our $user_fields = @field_width;        # number of fields specified by user
+
+our $auto_format = ($user_fields == 0 or grep {$_ > 0} @field_width);
+
+our $end_of_file = 0;               # flag will be set by input reader
+our $page_num = 0;                  # keep track of page and line count
+our $line_num = 0;
+
+our $decoder = undef;
+if (defined $Charset) {
+  $decoder = find_encoding($Charset);
+  die "Error: unknown character encoding '$Charset'.\n"
+    unless defined $decoder;
+}
+
+# these variables are computed for each page in the page loop below, but accessed by print_record()
+our @width;     # list of field widths
+our @format;    # list of formats for fields
+our $fields;    # no. of fields detected
+
+# open output pipe to a2ps formatter, or associated $OUT with STDOUT stream
+our $OUT = new FileHandle;
+if ($PostScript) {
+  my $pipe = a2ps_call();
+  open($OUT, "|-", $pipe)
+    or die "Can't spawn PostScript formatter (... | $pipe): $!";
+}
+else {
+  open($OUT, ">-");
+}
+binmode($OUT, ":encoding($Charset)")
+  if defined $Charset;
+
+# main loops (outer: pages, inner: lines)
+PAGE:
+while (not $end_of_file) {
+  $page_num++;
+
+  # initialise page input buffer and formatting variables
+  @width = @field_width;          # list of field widths (negative values = fixed width given by user)
+  $fields = $user_fields;         # no. of fields detected
+  @format = ();                   # list of formats for fields
+  my @record = ();                # temporary storage for input records
+  my $records = 0;                # number of input records
+
+  # read input and compute required field widths if necessary
+  while (<>) {
+    $_ = $decoder->decode($_)
+      if defined $Charset;
+    chomp;
+    push @record, $_;
+    $records++;
+    $line_num++;
+    # report progress on every 1000th record with -v
+    if ($Verbose and ($line_num % 1000) == 0) {
+      my $cnt = int($line_num / 5000);
+      my $indent = $cnt % 12;
+      printf STDERR "%s>%s reading input [page %d, record #%03d]      \r", " " x $indent, " " x (11 - $indent), $page_num, $records;
+    }
+    # parse into fields if column widths have to be calculated
+    if ($auto_format) {
+      my @fld = ($Split) ? (split) : (split /\t/);
+      foreach my $i (0 .. $#fld) {
+        my $len = length $fld[$i];
+        while ($i >= $fields) {
+          $width[$fields] = 1;
+          $fields++;
+        }
+        $width[$i] = $len
+          if $len > $width[$i] and $width[$i] > 0;
+      }
+    }
+    last if ($records == $page_size); # exit if paging
+  }
+  @width = map {abs($_)} @width; # remove negative sign from fixed field widths
+
+  printf STDERR " << <<  writing output [page %d with %d records]       \r", $page_num, $records
+    if $Verbose;
+  $end_of_file = 1 unless defined $_;
+
+  # compute format table (replicate last entry if necessary)
+  my $type = "l";
+  foreach my $i (0 .. $fields-1) {
+    $type = substr $Format, $i, 1
+      if $i < length $Format;
+    $format[$i] = $type;
+  }
+
+  # adjust field widths for header if necessary
+  if ($auto_format and @column_labels > 0) {
+    foreach my $i (0 .. $fields-1) {
+      $width[$i] = length $column_labels[$i]
+        if $width[$i] < length $column_labels[$i];
+    }
+  }
+
+  # print formatted table from buffer
+  if (@column_labels) {
+    print_record(@column_labels);
+    print $OUT "\n";
+  }
+  foreach my $line (@record) {
+    my @fld = ($Split) ? (split " ", $line) : (split /\t/, $line);
+    print_record(@fld); # print line according to formatting choices
+  }
+
+  # print page separator in -p mode
+  if ($PostScript) {
+    print $OUT "\f";
+  }
+  else {
+    print $OUT "\n\n"
+      if $page_size > 0;
+  }
+}
+
+# close output pipe
+$OUT->close;
+if ($Verbose) {
+  print STDERR " " x 78, "\r";
+  printf STDERR "Formatting complete (%d lines on %d page%s).\n", $line_num, $page_num, ($page_num > 1 ? "s" : "");
+}
+
+
+# print_record(@fields)
+#   prints a line (i.e. table row) according to format definitions and column widths in global variables
+sub print_record {
+  my @fld = @_;
+  my $col = 0;                # ASCII start column of current field (ignoring field separators)
+  my $field_bdry = 0;         # where right field bdry _should_ be
+  my $line_fields = scalar @fld;
+  $line_fields = $fields
+    if $line_fields > $fields; # if user has specified mandatory field widths, only those fields will be printed
+  foreach my $j (0 .. $line_fields-1) {
+    $field_bdry += $width[$j];
+    my $s = $fld[$j];
+    $col += length $s;
+    if ($col < $field_bdry) { 
+      my $fill = $field_bdry - $col;                # fill with blanks if necessary
+      print $OUT " " x $fill if $format[$j] eq "r"; # fill here if right-justified
+      print $OUT $s;                                # print field content
+      print $OUT " " x $fill if $format[$j] eq "l"; # fill here if left-justified
+    }
+    else {
+      print $OUT substr($s, 0, $width[$j]);         # or cut field content to specified width
+    }
+    $col = $field_bdry; # in either case, we're now exactly at column $field_bdry
+    if ($j + 1 < $line_fields) {
+      print $OUT " ";   # print field separator except after last field
+      print $OUT " "  # extra blank between right|left justified fields
+        if ($format[$j] eq "r") && ($format[$j+1] eq "l"); 
+    }
+  }
+  print $OUT "\n";
+}
+
+

@@ -1,0 +1,246 @@
+#!/usr/bin/perl -w
+# -*-cperl-*-
+###################################################################
+###                                                             ###
+###    Author: Stefan Evert                                     ###
+###   Purpose: Extract entries for given LaTeX document from bibliography database
+###   Created: Wed Sep 15 13:30:58 2004                         ###
+###  Modified: Tue Apr 15 00:37:43 2008 (severt)                ###
+###                                                             ###
+###################################################################
+# 
+# 
+# 
+$| = 1;
+
+# use sigtrap 'handler' => sub { die "Signal caught. Exiting.\n" }, qw<normal-signals>;
+
+use FileHandle;
+use Getopt::Long;
+
+$Output = undef;        # name of generated bibtex file (default: <basename>.bib)
+@Bibfiles = ();         # additional bibliographies to be loaded
+$PDFlatex = 0;          # whether to use pdflatex (in case plain latex does not work)
+$Xelatex = 0;           # whether to use xelatex (overrides $PDFlatex)
+$Verbose = 0;           # show some progress information
+$Debug = 0;             # show debugging messages & output of external programs
+$Help = 0;              # show help page?
+
+$ok = GetOptions(
+                 "output|o=s" => \$Output,
+                 "bib|b=s" => \@Bibfiles,
+                 "pdflatex|pdf|p" => \$PDFlatex,
+                 "xelatex|x" => \$Xelatex,
+                 "verbose|v" => \$Verbose,
+                 "debug|d" => \$Debug,
+                 "help|h" => \$Help,
+                 );
+
+die "\nUsage:  bibextract [options] file.tex\n\n",
+  "This program extracts the bibtex entries referenced in a latex\n",
+  "source file from the respective .bib files and saves them in a\n",
+  "local file that can be distributed with the latex source.\n",
+  "If the .aux corresponding to the input file does not exist, the\n",
+  "document is compiled with latex; but an outdated .aux file will\n",
+  "not be recreated automatically. There is only limited support for\n",
+  "biblatex at the current time; it will be necessary to specify the\n",
+  "relevant .bib files manually with the -b option.\n\n",
+  "It is assumed that each bibtex entry starts with an entry type spec,\n",
+  "followed by the citation key on the same line, and that entries are\n",
+  "separated by one or more blank lines (but do not contain blank lines).\n",
+  "Furthermore, the 'latex' and 'kpsewhich' programs from a kpathesea-based\n",
+  "LaTeX distribution must be available in the standard search path.\n\n",
+  "Options:\n",
+  "  -o <bib>, save generated bibextract in file <bib> (default: file.bib)\n",
+  "    --output=<bib>\n",
+  "  -b <bib>, load specified bibliography in addition to those found in\n",
+  "    --bib=<bib>  the .aux file (can be used multiple times)\n",
+  "  -p,       use 'pdflatex' instead of 'latex' to compile document\n",
+  "    --pdflatex, --pdf\n",
+  "  -x,       use 'xelatex' instead of 'latex' to compile document\n",
+  "    --xelatex\n",
+  "  -v,       print some progress information\n",
+  "    --verbose\n",
+  "  -d,       show some debugging messages\n",
+  "    --debug\n",
+  "  -h       this help page\n",
+  "    --help\n\n"
+  unless $ok and @ARGV == 1 and not $Help;
+
+$Base = shift @ARGV;
+$Base =~ s/\.tex$//i;                                # remove .tex extension if it was specified
+
+$Verbose = 1
+  if $Debug;
+our $Latex = ($Xelatex && "xelatex") || ($PDFlatex && "pdflatex") || "latex";
+
+die "Error: latex file '$Base.tex' does not exist.\n"
+  unless -f "$Base.tex";
+
+$Output = "$Base.bib"                                # default output file (without -o option)
+  unless defined $Output;
+
+unless (-f "$Base.aux") {
+  print "- running latex on '$Base.tex'\n"        # run latex on source to generate .aux file
+    if $Verbose;
+  sys_cmd("echo x | $Latex $Base");
+  die "Error: can't find generated file $Base.aux\n"
+    unless -f "$Base.aux";
+}
+
+%BIB = ();                                        # collect entries from .bib files
+%CITE = ();                                        # collect citations from .aux file(s)
+
+foreach my $bf (@Bibfiles) {
+  $bf .= ".bib" 
+    unless $bf =~ /\.bib$/i;
+  read_bib($bf, \%BIB);
+}
+
+@Input = ();                                        # input lines from .aux file(s)
+slurp_file("$Base.aux", \@Input);
+
+while (@Input) {                                # process lines from .aux file(s)
+  $line = shift @Input;
+  print ">> $line\n"
+    if $Debug;
+  if ($line =~ /\\\@input\{(.*?)\}/) {                         # \@input{file.aux}
+    slurp_file($1, \@Input);
+  }
+  elsif ($line =~ /\\bibdata\{(.*?)\}/) {                      # \@bibdata{stefan,diss}
+    @bibfiles = map {"$_.bib"} split /,/, $1;
+    foreach $bf (@bibfiles) {
+      read_bib($bf, \%BIB);
+    }
+  }
+  elsif ($line =~ /\\(?:citation|abx\@aux\@cite)\{(.*?)\}/) {  # \citation{Evert:04phd} or \abs@aux@cite{Evert:04phd}
+    foreach my $ref (split /,/, $1) {
+      print "INSERT KEY: $ref\n"
+        if $Debug;
+      $CITE{$ref}++;
+    }
+  }
+}
+
+@notfound = grep {not exists $BIB{$_}} keys %CITE; # check first whether all references are found in the database
+if (@notfound) {
+  die "Error: can't find the following citation(s) in the bibliography database:\n\t",
+    join("\n\t", sort @notfound),
+      "\nOperation aborted.\n";
+}
+
+if (-f $Output) {                                # try to back up generated file before overwriting it
+  print "- writing backup file $Output~\n"
+    if $Verbose;
+  sys_cmd("cp -f $Output $Output~");
+}
+
+$fh = new FileHandle "> $Output"                # now write bibtex file with extracted entries 
+  or die "Error: can't write file '$Output'\n";
+print "=> $Output\n"
+  if $Verbose;
+print $fh "\%\% This is an automatically generated bibliography file.\n";
+print $fh "\%\% Please do not edit this file (update it with 'bibextract').\n\n";
+foreach $key (sort keys %CITE) {
+  print $fh $BIB{$key}, "\n";
+  print "EXTRACT BIBTEX ENTRY: $key\n"
+    if $Debug;
+}
+$fh->close;
+
+exit 0;                                                # that's it
+
+
+
+
+## run external command with system(), suppressing output without -d option
+sub sys_cmd {
+  my $cmd = shift;
+  $cmd .= ' >/dev/null 2>&1'
+    unless $Debug;
+  my $ok = system $cmd;
+  if ($ok != 0) {
+    my $exit_code = $ok >> 8;
+    die "Error: failed to execute command\n\t$cmd\nbecause $!\n"
+      if ($ok & 0xff) != 0;
+    die "Error: the system command\n\t$cmd\nfailed with exit code $exit_code\n";
+  }
+}
+
+## slurp a file into an array of chomped lines (appends to existing array)
+sub slurp_file {
+  my $file = shift;
+  my $aref = shift;
+  my $fh = new FileHandle $file
+    or die "Error: can't open file '$file'\n";
+  print "- reading file '$file'\n"
+    if $Verbose;
+  while (<$fh>) {
+    chomp;
+    push @$aref, $_;
+  }
+  $fh->close;
+}
+
+## read .bib file, storing entries in hash 
+sub read_bib {
+  my $file = shift;
+  my $href = shift;
+  my $cmd = "kpsewhich $file";
+  $cmd .= " 2>/dev/null"
+    unless $Debug;
+  my $path = `$cmd`;
+  if ($path) {
+    chomp $path;
+    die "Error: can't find bibliography file '$file' at path\n\t$path\nreturned by kpsewhich tool\n"
+      unless -f $path;
+    my $fh = new FileHandle $path
+      or die "Error: can't open file '$path'\n";
+    print "- reading bibliography '$file'\n"
+      if $Verbose;
+    print "  full path: $path\n"
+      if $Debug;
+  LINE:
+    while (1) {
+      $_ = <$fh>;
+      last LINE unless $_;                        # exit loop at end of file
+      next LINE if /^\s*$/ or /^\s*\%/;                # skip comments and empty lines
+      if (/^\s*\@comment/i) {                        # skip @comment entries
+        my $comment = $_;
+        while (1) {
+          $_ = <$fh>;
+          last LINE unless $_;
+          last if /^\s*$/ and $comment =~ /\}\s*$/;
+          $comment .= $_;
+        }
+      }
+      die "Format error: expected start of bibtex entry, but got:\n\t$_(line #$. of $path)\n"
+        unless /^\s*\@[A-Za-z]+\s*\{\s*(\S+)\s*\,/;
+      my $key = $1;                                # extract key of entry
+      my $entry = $_;
+    FIELD:
+      while (<$fh>) {
+        last FIELD                             # blank line (or EOF) marks end of entry
+          if /^\s*$/ and $entry =~ /\}\s*$/; # make sure that entry ends with closing brace, so we're not confused by blank lines in entry
+        $entry .= $_;
+      }
+      if (exists $href->{$key}) {
+        print STDERR "Warning: duplicate bibtex entry for key '$key' (ignored)\n";
+        print STDERR "=" x 60, "\n",
+          "First entry for '$key':\n", $href->{$key},
+            "-" x 60, "\n",
+              "This entry for '$key':\n", $entry,
+                "=" x 60, "\n"
+                  if $Debug;
+      }
+      $href->{$key} = $entry;
+      print "INSERT BIBENTRY: $key\n"
+        if $Debug;
+    }
+    $fh->close;
+  }
+  else {
+    die "Error: can't find bibliography file '$file'\n";
+  }
+}
+

@@ -1,0 +1,150 @@
+=head1 TECHNICAL NOTES
+
+Some useful B<rsync> options:
+
+=over 4
+
+=item -q, --quiet
+
+Depends on what the sync process looks like. Perhaps make it configurable.
+
+=item -r, --recursive
+
+Definitely.
+
+=item -b, --backup
+
+if user has specified B<backup> option in configuration file
+
+=item -u, --update
+
+Don't overwrite more recent files. We'll want to use this except for the
+B<-push> and B<-pop> modes (where we must ask the user to reconfirm!).
+
+=item -l, --links
+
+Re-create symbolic links on the remote system. Otherwise, all symbolic links
+are skipped, which may sometimes be the right thing to do. Should check how rsync
+copes with subdirs that are symbolic links.
+
+=item -L, --copy-links
+
+Treats links like ordinary files, which is probably not what we want.
+
+=item --safe-links
+
+Sounds promising: relative symlinks within the source tree are re-created,
+but links that point outside are ignored. However, note that this will not work
+if we update subdirectories separately (think of the DataSet link in the F<UCS/System>
+and F<UCS/System/R> directories).
+
+=item -p, --perms
+
+Update permissions. Very sensible.
+
+=item -o, --owner 
+
+Forget it. Allowed only for the super-user if the owner is different from
+the remote user.
+
+=item -g, --group
+
+Could do that, but we can't map group names, so we'd have to create the same
+groups on the local machine.
+
+=item -t, --times
+
+Update time even if remote file is identical. Very probably what we want, and B<-a> 
+does it, too.
+
+=item -n, --dry-run
+
+Incredibly useful for testing, and probably also later with the B<-debug> option.
+
+=item --delete
+
+Delete remote files that do not exist on the local machine. For B<-push> and B<-pop>,
+and do not forget to get a re-confirmation first.
+
+=item -e ssh, --rsh=ssh
+
+Of course.
+
+=item --exclude=PATTERN, --exclude-from=FILE
+
+=item --include=PATTERN, --include-from=FILE
+
+At least to exclude temporary files and backup files. May also be helpful for 
+selecting subdirectories (if they are copied to the same point in the destination
+tree.
+
+Patterns are compared in the order in which they are specified on the command-line,
+and the first matching pattern is acted on. Which means, in lay terms, if you use
+an include pattern to override a more generic exclude pattern (the only way for an
+include pattern to be useful), then it must I<precede> the exclude pattern on the
+command-line.
+
+There are basically three types of patterns:
+
+=over 4
+
+=item *
+
+Filename patterns, which are only compared against the local filename, regardless
+of which directory we are in. This includes all the CVS excludes below.
+
+=item *
+
+Relative path patterns, containing at least one C</> character. These are matched
+against the full pathname, but may actually refer to any portion of the full 
+pathname when recursing into subdirs.
+
+=item *
+
+Absolute path patterns, starting with a C</> character. These are always matched
+against full path from the base of the directory tree.
+
+=back
+
+It is still not quite clear how those patterns work, and we will definitely
+need some experiments in the F</tmp> directory before we can build a working
+prototype.
+
+The shell wildcards C<?>, C<*>, and C<[..]> are recognised and expanded. A pattern
+starting with C<+ > (note the space!) is always considered an include pattern, one
+starting with C<- > is considered an exclude pattern. This makes building complex
+exclude/include structures much easier. A pattern ending in C</> will only match
+directories!
+
+
+=item -C, --cvs-exclude
+
+Activates standard list of exclude patterns (those that CVS uses). We may want finer
+control, but this list (as shown below) is a good starting point, and at the very least
+we should exclude the patterns C<*~>, C<*.a>, C<*.o>, and C<*.so>.
+
+    RCS SCCS CVS  CVS.adm  RCSLOG  cvslog.*  tags  TAGS
+    .make.state  .nse_depinfo  *~ #* .#* ,* *.old *.bak
+    *.BAK *.orig *.rej .del-* *.a *.o  *.obj  *.so  *.Z
+    *.elc *.ln core
+
+=item -z, --compress
+
+Although we will usually snyc over a local network, compression should not do much 
+damage and may speed things up a little over a slow cable. Perhaps make it a command-line
+option?
+
+=item --stats, --progress
+
+Can be used to make the program execution a little flashier, and perhaps for debugging.
+As L<rsync> puts it: "[The --progress option] gives the bored user something to watch."
+
+=item --extended-attributes, -E
+
+B<Apple only:> preserve extended attributes (resource forks, ACLs, metadata) when copying 
+files.  Only works if both local and remote machine are running Apple's patched B<rsync>
+binary shipped with Mac OS X.
+
+=back
+
+

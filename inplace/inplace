@@ -1,0 +1,161 @@
+#!/usr/bin/perl -w
+# -*-cperl-*-
+###################################################################
+###                                                             ###
+###    Author: Stefan Evert                                     ###
+###   Purpose: Simple in-place editor for configuration variables##
+###   Created: Mon Dec 12 12:17:24 2005                         ###
+###  Modified: Mon Dec 12 14:17:41 2005 (severt)                ###
+###                                                             ###
+###################################################################
+# 
+# 
+# 
+
+use Config;
+use Getopt::Long;
+use FileHandle;
+
+$Opt_Shebang = 0;		# --shebang = substitute or insert shebang line
+$Opt_Perl = $Config{"perlpath"}; # --perl = use this Perl interpreter in shebang line
+@Opt_Includes = ();		# -I = include directories for shebang line
+$Opt_Cperl = 0;			# --cperl = insert -*-cperl-*- after shebang line
+$Opt_Help = 0;			# --help = help message
+
+$ok = GetOptions("shebang|s" => \$Opt_Shebang,
+		 "perl|p=s" => \$Opt_Perl,
+		 "I=s" => \@Opt_Includes,
+		 "cperl|c" => \$Opt_Cperl,
+		 "help|h" => \$Opt_Help,
+		 );
+
+$ok = 0
+  unless @ARGV >= 1;
+
+die
+  "\n",
+  "Usage:  inplace [options] file.pl [NAME=VALUE ...]\n",
+  "\n",
+  "  -s, --shebang  substitute or insert #! line\n",
+  "  -p [<file>]  user Perl interpreter <file> fr #! line\n",
+  "    --perl[=<file>]   (default: interpreter running this script)\n",
+  "  -I <dir>     specify additional library directory for #! line\n",
+  "                      (use multiple -I options for more than one)\n",
+  "  -c, --cperl  insert -*-cperl-*- after #! line (for Emacs)\n",
+  "  -h, --help   show this help page\n",
+  "\n",
+  "The purpose of the 'inplace' program is to insert configuration data\n",
+  "into a Perl script easily from the command line.  In addition to\n",
+  "modifications selected by the options above, configuration items can be\n",
+  "specified as NAME=VALUE pairs after the name of the file to be edited.\n",
+  "NAME must be a simple Perl identifier.  If the script contains a line that\n",
+  "sets the scalar variable \$NAME, 'inplace' will insert VALUE as a single-\n",
+  "quoted string there.  Otherwise, the in-place edit aborts with an error\n",
+  "message.  A backup copy of the original file is saved as 'file.pl~'.\n",
+  "\n"
+  if $Opt_Help or not $ok;
+
+## ---------- set up options and arguments
+
+warn "Warning: -I flags will be ignored without --shebang (-s) option.\n"
+  if @Opt_Includes and not $Opt_Shebang;
+
+$filename = shift @ARGV;
+die "Error: script file '$filename' does not exist.\n"
+  unless -f $filename;
+
+@Substitutes = ();		# [$regex => line] pairs for NAME=VALUE substitution
+while (@ARGV) {
+  $specifier = shift @ARGV;
+  $specifier =~ /^(\w+)\s*=\s*(.*)$/
+    or die "Can't parse argument '$specifier' as NAME=VALUE pattern.\n";
+  ($name, $value) = ($1, $2);
+  $value =~ s/\\/\\\\/g;	# escape \ and ' for single-quoted string
+  $value =~ s/'/\\'/g;
+  push @Substitutes, 
+    [ qr/^\s*\$${name}\s*=\s+/ => "\$${name} = '${value}';\t# edited by inplace\n", $specifier ];
+}
+
+## ---------- read script file into @lines
+
+$fh = new FileHandle $filename
+  or die "Can't open script file '$filename': $!\n";
+@lines = <$fh>;
+$fh->close;
+
+while (@lines and $lines[0] =~ /^\s*$/) {
+  shift @lines;	# delete leading empty lines (they're usually not a good idea)
+}
+
+## ---------- edit/insert #! line if requested
+
+if ($Opt_Shebang) {
+  $shebang = "#!${Opt_Perl} -w";
+  $shebang .= " ".join(" ", map {"-I$_"} @Opt_Includes)
+    if @Opt_Includes;
+  $shebang .= "\n";
+  if (@lines and $lines[0] =~ /^\s*#!/) {
+    $lines[0] = $shebang;
+  }
+  else {
+    unshift @lines, $shebang;
+  }
+}
+
+if ($Opt_Cperl) {
+  $max_idx = (@lines < 20) ? @lines-1 : 19; # look for -*-cperl-*- in first 20 lines
+  if (not grep {/-\*-cperl-\*-/i} @lines[0 .. $max_idx]) {
+    $index = (@lines and $lines[0] =~ /^\s*#!/) ? 1 : 0; # insert -*-cperl-*- at this index
+    splice @lines, $index, 0, "# -*-cperl-*-\n";
+  }
+}
+
+##---------- perform NAME=VALUE substitutions
+
+foreach $entry (@Substitutes) {
+  ($rx, $line, $orig) = @$entry;
+  $subs = 0;
+  foreach (@lines) {
+    if (/$rx/) {
+      $_ = $line;
+      $subs++;
+    }
+  }
+  die "Error: unable to substitute pattern $orig in file $filename (aborted).\n"
+    unless $subs > 0;
+  die "Error: multiple substitutions ($subs) made for pattern $orig in file $filename (aborted).\n"
+    if $subs > 1;
+}
+
+##---------- make backup copy and write back file
+
+$backup = "$filename~";
+
+if (-f $backup) {
+  unlink $backup
+    or die "Can't delete old backup file $backup: $!\n";
+}
+
+$status = system "cp", $filename, $backup;
+die "Can't make backup of $filename (as $backup): $!\n"
+  unless $status == 0;
+
+$fh = new FileHandle "> $filename" # overwrite original file to preserve access permissions & ownership
+  or die "Can't overwrite file $filename: $!\n";
+foreach (@lines) { 
+  print $fh $_
+    or die "Error writing $filename: $!\n", 
+      "File may be damaged, please compare to the backup file $backup!\n";
+}
+$fh->close
+  or die "Error writing $filename: $!\n", 
+  "File may be damaged, please compare to the backup file $backup!\n";
+
+$status = system "touch", "-r", $backup, $filename;
+warn "Warning: can't reset timestamps of file $filename: $!\n"
+  unless $status == 0;
+
+#---------- that's it (I hope)
+
+print "File $filename has been edited successfully.\n";
+

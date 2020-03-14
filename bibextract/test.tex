@@ -1,0 +1,69 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%    Author: Stefan Evert                                     %%%
+%%%   Purpose: Test file                                        %%%
+%%%   Created: Thu Dec 16 21:40:29 2004                         %%%
+%%%  Modified: Thu Dec 16 22:41:37 2004 (evert)                 %%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%  
+%%  
+%%  
+
+
+\documentclass[a4paper]{article}
+
+\usepackage{vmargin}
+\setpapersize[portrait]{A4}
+\setmarginsrb{25mm}{10mm}{20mm}{20mm}% left, top, right, bottom
+{12pt}{15mm}% head heigth / separation
+{0pt}{15mm}% bottom height / separation
+%% \setmargnohfrb{30mm}{20mm}{20mm}{20mm}
+
+\setlength{\parindent}{0mm}
+\setlength{\parskip}{\medskipamount}
+
+\usepackage[english]{babel}
+\usepackage[latin1]{inputenc}
+
+%% \usepackage[T1]{fontenc}
+%% \usepackage{textcomp}
+
+%% \usepackage{mathptmx}
+%% \usepackage{mathpazo}
+%% \usepackage{charter,helvet,courier}
+%% \usepackage{avant}
+%% \usepackage{pifont}
+%% \usepackage{eucal}
+
+%% \usepackage{pslatex}
+%% \renewcommand{\familydefault}{\sfdefault}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx,rotating}
+%% \usepackage[monochrome]{color}
+\usepackage{array,hhline,booktabs}
+\usepackage{xspace}
+%% \usepackage{ifthen,calc,hyphenat}
+%% \usepackage{pgf,pgfarrows,pgfnodes,pgfautomata,pgfheaps,pgfshade,xcolor,colortbl}
+
+\usepackage[sort]{natbib}
+\usepackage{url}
+\bibpunct{(}{)}{;}{a}{}{,}
+
+\begin{document}
+
+
+\section*{Example of external bib\TeX\ references}
+
+Should support references such as \citet{Evert:04b} as well as multiple
+references such as
+\citep{Luedeling:Evert:Heid:00,Evert:Luedeling:01,Luedeling:Evert:03}.
+Hopefully, references included by \verb_\nocite_ commands will work, too.
+\nocite{Krenn:00}
+
+\include{test2}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+%% \bibliography{test}
+
+\end{document}

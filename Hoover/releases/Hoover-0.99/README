@@ -1,0 +1,51 @@
+
+    Hoover -- Clean up temporary files from TeX and Emacs
+
+
+LICENSE
+
+    This software is provided AS IS and the author makes no warranty as to
+    its use and performance. You may use the program, redistribute and
+    modify it under the same terms as Perl itself.
+
+    IN NO EVENT WILL THE AUTHOR BE LIABLE TO YOU FOR ANY CONSEQUENTIAL,
+    INCIDENTAL OR SPECIAL DAMAGES, INCLUDING ANY LOST PROFITS OR LOST
+    SAVINGS, EVEN IF HE HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES,
+    OR FOR ANY CLAIM BY ANY THIRD PARTY.
+
+    Copyright (C) 2003-2005 by Stefan Evert
+    (<http://purl.org/stefan.evert>).
+
+
+DESCRIPTION
+
+    When TeX/LaTeX is used to format a document, many temporary files are
+    created in the same directory as the source file. Unfortunately, TeX
+    does not offer an easy way to remove these temporary files when they are
+    no longer needed. The Hoover program was designed to take over this job.
+    It also deletes Emacs backup and cache files.
+
+    Type "perldoc Hoover" for more information and usage instructions.
+
+
+INSTALLATION
+
+    Adjust the path to the Perl interpreter (#!/usr/bin/perl) in the first 
+    line of the "Hoover" script, if necessary.  Then copy the script to a
+    directory in your search path.  Typical installation directories are
+    "/usr/local/bin" for a site-wide installation (usually requires
+    administrator privileges) and "~/bin" for a personal installation.
+
+    On most Unix systems (including Linux and Mac OS X), you can install
+    Hoover with one of the following commands:
+
+      install -m 755 Hoover /usr/local/bin
+
+    or
+
+      install -m 755 Hoover ~/bin
+
+
+HISTORY
+
+2005-06-12  Version 0.99 -- first public release

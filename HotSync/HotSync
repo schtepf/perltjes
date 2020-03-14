@@ -1,0 +1,1686 @@
+#!/usr/bin/perl -w
+# -*-cperl-*-
+$| = 1;
+
+use Carp;
+use English;
+use Data::Dumper;
+use Getopt::Long;
+use Pod::Usage;
+use File::Path qw(mkpath);
+
+$VERSION = "0.8.2";
+
+############################################################################
+##
+## global variables
+##
+
+%TaskType = ();                                 # hash of defined tasks with their types (s=sync, a=archive, *=multi)
+%TaskPars = ();                                 # parameters for each task ($TaskPars{$task} = <copy of %LocalState>)
+
+$NumTasks = 0;
+%GlobalState = (                                # global parameters and their default values (in config file)
+                "host" => undef,
+                "user" => undef,
+                "extended" => 0,
+                "permissions" => 1,
+                "backup" => 1,
+                "sync-all" => 0,
+                );
+%LocalState = ();                               # local copy of global state (used when defining tasks)
+%Config = (                                     # global configuration flags (e.g. to adjust paths)
+           "tar" => "tar",
+           "rsync" => "rsync",
+           );
+
+## default list of files that are excluded from synchronisation
+@Excludes = qw<*~ *.o *.so *.a *.bak *.BAK *.ps *.dvi *.log *.aux *.toc *.flc *.bbl *.blg *.flc .DS_Store>;
+
+############################################################################
+##
+## parse command-line options
+##
+
+$Opt_Debug = 0;                                 # (lots of) debugging output
+$Opt_Help = 0;                                  # display help message from embedded POD documentation
+$Opt_Doc = 0;                                   # display full embedded POD documentation
+$Opt_Version = 0;                               # print software version
+$Opt_Interactive = 0;                           # enter interactive mode
+$Opt_Verbose = 0;                               # be a little more verbose (to keep bored users entertained)
+$Opt_List = 0;                                  # -list    flag
+$Opt_Push = 0;                                  # -push    flag
+$Opt_Pop = 0;                                   # -pop     flag
+$Opt_Backup = 0;                                # -backup  flag
+$Opt_Restore = 0;                               # -restore flag
+$Opt_DryRun = 0;                                # dry run: show what rsync _would_ have done
+$Opt_SyncAll = 0;                               # override sync-all => 0 parameter (useful for -push and -pop)
+$Opt_ConfigFile = "";                           # name of configuration file (defaults to ~/.HotSync)
+$Opt_UploadLimit = 0;                           # -ul      option
+$Opt_DownloadLimit = 0;                         # -dl      option
+$Opt_ExtendedAttributes = 0;                    # preserve extended attributes (Mac OS X only, requires patched rsync)
+$Opt_NoPerm = 0;                                # don't preserve file permissions
+$Task = "";
+
+Getopt::Long::Configure(qw<no_auto_abbrev no_bundling no_ignore_case>);
+$ok = GetOptions(
+                 "debug|d" => \$Opt_Debug,
+                 "help|h" => \$Opt_Help,
+                 "doc|perldoc|p" => \$Opt_Doc,
+                 "version|V" => \$Opt_Version,
+                 "interactive|i" => \$Opt_Interactive,
+                 "verbose|v" => \$Opt_Verbose,
+                 "config-file|f" => \$Opt_ConfigFile,
+                 "list|l" => \$Opt_List,
+                 "push" => \$Opt_Push,
+                 "pop" => \$Opt_Pop,
+                 "backup" => \$Opt_Backup,
+                 "restore" => \$Opt_Restore,
+                 "dry-run|n" => \$Opt_DryRun,
+                 "all|a" => \$Opt_SyncAll,
+                 "upload-limit|ul=i" => \$Opt_UploadLimit,
+                 "download-limit|dl=i" => \$Opt_DownloadLimit,
+                 "extended-attributes|E" => \$Opt_ExtendedAttributes,
+                 "no-permissions|np" => \$Opt_NoPerm,
+                );
+$ok = 0
+  unless (@ARGV > 0) or ($Opt_List or $Opt_Help or $Opt_Doc or $Opt_Interactive);
+$ok = 0
+  if (@ARGV > 0) and ($Opt_Help or $Opt_Doc or $Opt_Interactive);
+if ($Opt_Version) {
+        print "HotSync $VERSION\n";
+        exit 0;
+}
+pod2usage(qw<-verbose 0 -exitval 1>)
+  unless $ok;
+pod2usage(qw<-verbose 1 -exitval 0>)
+  if $Opt_Help;
+pod2usage(qw<-verbose 2  -exitval 0>)
+  if $Opt_Doc;
+## remaining command-line arguments in @ARGV should be task names or patterns
+
+############################################################################
+##
+## print banner
+##
+
+print "This is HotSync v$VERSION\n";
+print "(C) 2004-2011 by Stefan Evert (http://purl.org/stefan.evert)\n\n";
+
+############################################################################
+##
+## read in user's .HotSync configuration file (in home directory)
+## or file specified with --config-file option
+## 
+
+if (not $Opt_ConfigFile) {
+  $home = $ENV{"HOME"};
+  if (not defined $home or not -d $home) {
+    $home = `echo ~`;
+    chomp $home;
+  }
+  if (not -d $home) {
+    die "Can't find home directory (\$HOME or ~). Period.\n";
+  }
+  $config_file = "$home/.HotSync";
+  if (not -f $config_file) {
+    die "Error: configuration file ~/.HotSync not found.\n",
+      "(type 'perldoc HotSync' and refer to the CONFIGURATION section for details)\n";
+  }
+  print "[loading configuration from $config_file]\n"
+    if $Opt_Verbose;
+  $Opt_ConfigFile = $config_file;
+}
+$ok = do $Opt_ConfigFile;
+if (not $ok) {
+  die "Can't parse configuration file:\n $@\n" if $@;
+  die "Can't load configuration file: $!\n" if not defined $ok;
+  die "Configuration file invalid (return value $ok)\n";
+}
+print "[$ok tasks defined]\n"
+  if $Opt_Verbose;
+print Data::Dumper->Dump([\%TaskType, \%TaskPars], ["Tasks ", "Params"])
+  if $Opt_Debug;
+
+## validate multitasks in configuration file
+foreach $task (grep {$TaskType{$_} eq "*"} sort keys %TaskType) {
+  my @subtasks = @{$TaskPars{$task}->{"subtasks"}};
+  my @undef = grep {not defined $TaskType{$_}} @subtasks;
+  die "Configuration error: subtask".(@undef > 1 ? "s" : "")." ".
+    join(", ", map {"'$_'"} @undef)." not defined in multitask '$task'\n"
+      if @undef > 0;
+  my @multi = grep {$TaskType{$_} eq "*"} @subtasks;
+  die "Configuration error: multitask".(@multi > 1 ? "s" : "")." ".
+    join(", ", map {"'$_'"} @multi)." not allowed in multitask '$task'\n"
+      if @multi > 0;
+  my @syncs = grep {$TaskType{$_} eq "s"} @subtasks;
+  my @archs = grep {$TaskType{$_} eq "a"} @subtasks;
+  die "Configuration error: multitask '$task' must not mix sync and archive tasks.\n",
+    "  Sync:    ".join(", ", map {"'$_'"} @syncs)."\n",
+      "  Archive: ".join(", ", map {"'$_'"} @archs)."\n"
+        if @syncs > 0 and @archs > 0;
+}
+
+############################################################################
+##
+## enter interactive mode here
+##
+
+if ($Opt_Interactive) {
+  eval "use Term::ReadLine; use Term::ReadLine::Gnu";
+  die "Sorry, --interactive mode requires module Term::ReadLine::Gnu. Aborted.\n"
+    if $@;
+  interactive_mode();
+  print "Goodbye. Share and enjoy!\n";
+  exit 0;
+}
+
+############################################################################
+##
+## >> HotSync -list  [Task ...]
+##
+
+if ($Opt_List) {
+  if (@ARGV > 0) {
+    # if tasks are specified, list those tasks (after expanding wildcards)
+    @Tasks = match_tasks(@ARGV);
+  }
+  else {
+    # otherwise, list all tasks (except for hidden tasks starting with "-")
+    @Tasks = grep {not /^-/} match_tasks("*");
+  }
+  foreach $task (@Tasks) {
+    if ($Opt_Verbose) { describe_task($task); }
+    else { list_task($task); }
+  }
+  print "\n";
+  exit 0;
+}
+
+############################################################################
+##
+## expand wildcard patterns and multitasks, removing any duplicates
+##
+
+@Tasks = expand_multi(match_tasks(@ARGV));
+
+############################################################################
+##
+## check that all requested task(s) are of the same type (required for command-line mode)
+##
+
+@SyncTasks = grep { $TaskType{$_} eq "s" } @Tasks;
+@ArchTasks = grep { $TaskType{$_} eq "a" } @Tasks;
+if (@SyncTasks and @ArchTasks) {
+  die "Error: all tasks must be of the same type.\n",
+    "  Synchronization task(s): ".join(", ", @SyncTasks)."\n",
+    "  Archive task(s): ".join(", ", @ArchTasks)."\n";
+}
+if (@Tasks == 0) {
+  die "Error: no valid tasks specified.\n",
+    "(try 'HotSync --list' or 'HotSync --help')\n"
+}
+
+foreach $Task (@Tasks) {
+  $Type = $TaskType{$Task}
+      unless defined $Type;
+  if ($gentype and $gentype ne $Type) {
+  }
+  $gentype = $Type;
+}
+
+############################################################################
+##
+## now process each task in turn and call respective subroutine
+##
+
+foreach $Task (@Tasks) {
+  $Type = $TaskType{$Task};
+
+  ##
+  ## >> HotSync  [-push | -pop]  SyncTask ...
+  ##
+  if ($Type eq "s") {
+    die "Error: --backup and --restore flags are not valid for synchronisation task.\n"
+      if $Opt_Backup or $Opt_Restore;
+    die "Error: you may not specify both --push and --pop flags.\n"
+      if $Opt_Push and $Opt_Pop;
+    if ($Opt_Push)   { die "** ABORT **\n" unless do_push($Task); }
+    elsif ($Opt_Pop) { die "** ABORT **\n" unless do_pop($Task); }
+    else             { die "** ABORT **\n" unless do_sync($Task); }
+  }
+
+  ##
+  ## >> HotSync  (-backup | -restore)  ArchiveTask ...
+  ##
+  elsif ($Type eq "a") {
+    die "Error: -push and -pop flags are not valid for archive task.\n"
+      if $Opt_Push or $Opt_Pop;
+    die "Error: you must specify either -backup or -restore for an archive task.\n"
+      unless $Opt_Backup xor $Opt_Restore;
+
+    if ($Opt_Backup) {
+      die "** ABORT **\n" unless do_backup($Task);
+    }
+    else {
+      die "** ABORT **\n" unless do_restore($Task);
+    }
+  }
+  ## oopsie
+  else {
+    die "Internal error: invalid type '$Type' for task $Task\n";
+  }
+  ## end of outer loop: foreach $Taks (@Tasks) { ...
+}
+
+############################################################################
+##
+## end of program
+##
+
+exit 0;
+
+
+############################################################################
+##
+## interactive mode (implemented as subroutine)
+##
+
+BEGIN { # need BEGIN block to make variable values visible in function definition below
+  our($TERM,$OUT);
+  our @cmd_task = qw<sync backup restore>;
+  our @cmd_misc = qw<list describe help ? exit>;
+  our @cmd_flag = qw<-push -pop on off>;
+  our @cmd_mod  = qw<test verbose>;
+}
+sub interactive_mode {
+  $ENV{PERL_RL} = "gnu";
+  $TERM = new Term::ReadLine "HotSync console";
+  $OUT = $TERM->OUT || \*STDOUT;
+  $TERM->ornaments("md,me,,");
+
+  ## TODO: should replace this by a full-fledged custom completion function
+  $TERM->Attribs->{completion_entry_function} = $TERM->Attribs->{list_completion_function};
+  $TERM->Attribs->{completion_word} =
+    [@cmd_task, @cmd_misc, @cmd_flag, @cmd_mod, sort keys %TaskType]; 
+
+  print $OUT "Welcome to the HotSync interactive console. You can use the TAB\n";
+  print $OUT "key for command and task name completion. Type 'help' for information\n";
+  print $OUT "on available commands and 'exit' to leave HotSync.\n\n";
+
+  while (defined ($_ = $TERM->readline("HotSync> "))) {
+    s/^\s+//;
+    s/\s+$//;
+    next if /^$/;
+    my @args = split;
+    do_command(@args)
+      or last;
+  }
+}
+
+sub do_command {
+  my $command = shift;
+  my @args = @_;
+  if ($command eq "help" or $command eq "?") {
+    print $OUT "Command summary:\n\n";
+    print $OUT "  list <tasks>     list tasks matching specified patterns\n";
+    print $OUT "  describe <tasks> give full description of tasks\n";
+    print $OUT "  sync <task>      perform synchronization task(s)\n";
+    print $OUT "    sync -push <task> update remote host from local tree\n";
+    print $OUT "    sync -pop <task>  update local tree from remote host\n";
+    print $OUT "  backup <task>    backup archive(s)\n";
+    print $OUT "  restore <task>   restore from archive(s)\n";
+    print $OUT "  verbose [on|off] switch on/off verbose mode (--verbose)\n";
+    print $OUT "  test [on|off]    switch on/off test mode (--dry-run)\n";
+    print $OUT "    test <cmd> ...    activate test mode temporarily\n";
+    print $OUT "  help, ?          this help message\n";
+    print $OUT "  exit             leave HotSync console\n";
+    print $OUT "\n";
+    print $OUT "You can use the wildcards * and ? to specify task names, or\n";
+    print $OUT "match them with regular expressions encosed in slashes (/.../).\n";
+    print $OUT "Add the modifiers :s, :a or :m to match only synchronization,\n";
+    print $OUT "archive, or multi tasks.\n";
+    print $OUT "\n";
+  } elsif ($command eq "exit") {
+    return 0;
+  } elsif ($command eq "verbose") {
+    if (@args) {
+      if (defined (my $flag = check_boolean_arg(@args))) {
+        $Opt_Verbose = $flag;
+      }
+    } else {
+      print $OUT "Verbose mode is ", ($Opt_Verbose) ? "on" : "off", ".\n"
+    }
+  } elsif ($command eq "test") {
+    if (@args) {
+      if (grep {lc($args[0]) eq $_} @cmd_task) { # test as modifier before sync, backup or restore
+        local $Opt_DryRun = 1; # execute command with --dry-run mode temporarily enabled
+        do_command(@args);
+      }
+      elsif (defined (my $flag = check_boolean_arg(@args))) {
+        $Opt_DryRun = $flag;
+      }
+    } else {
+      print $OUT "Test mode is ", ($Opt_DryRun) ? "on" : "off", ".\n"
+    }
+  } elsif ($command eq "list") {
+    my @tasks = (@args) ? match_tasks(@args) : sort grep { not /^-/ } keys %TaskType;
+    foreach my $task (@tasks) {
+      list_task($task);
+    }
+  } elsif ($command eq "describe") {
+    if (@args) {
+      my @tasks = match_tasks(@args);
+      foreach my $task (@tasks) {
+        describe_task($task);
+      }
+    } else {
+      print $OUT "Syntax error: please specify task(s) to describe.\n";
+    }
+  } elsif ($command eq "sync") {
+    my $mode = undef;
+    if (@args and $args[0] =~ /^--?(push|pop)$/i) {
+      $mode = lc($1);
+      shift @args;
+    }
+    if (@args) {
+      my @tasks = expand_multi(match_tasks(@args));
+      if (check_type("s", @tasks)) {
+        foreach my $task (@tasks) {
+          if ($mode) {
+            last unless do_sync($task, $mode);
+          } else {
+            last unless do_sync($task);
+          }
+        }
+      }
+    } else {
+      print $OUT "Syntax error: please specify task(s) to synchronize.\n";
+    }
+  } elsif ($command eq "backup" or $command eq "restore") {
+    if (@args) {
+      my @tasks = expand_multi(match_tasks(@args));
+      if (check_type("a", @tasks)) {
+        foreach my $task (@tasks) { 
+          last unless do_archive($task, ($command eq "restore") ? 1 : 0); 
+        }
+      }
+    } else {
+      print $OUT "Syntax error: please specify task(s) to backup or restore.\n";
+    }
+  } else {
+    print $OUT "Syntax error: unknown command '$command'.\n";
+  }
+  return 1;
+}
+
+sub check_boolean_arg {
+  if (@_ != 1) {
+    print $OUT "Syntax error: only one argument allowed.\n";
+    return undef;
+  }
+  my $arg = lc(shift);
+  if ($arg =~ /^(yes|on|1)$/) {
+    return 1;
+  }
+  elsif ($arg =~ /^(no|off|0)$/) {
+    return 0;
+  }
+  else {
+    print $OUT "Syntax error: invalid argument '$arg'. Use 'on' or 'off'.\n";
+    return undef;
+  }
+}
+
+
+
+############################################################################
+##
+## the main operations of HotSync are defined as subroutines, so they
+## can be invoked either from the command-line or from the interactive shell
+##
+
+############################################################################
+## list_task($name)
+##   list a specific task (name and short description)
+sub list_task {
+  my $task = shift;
+  my $type = $TaskType{$task};
+  if (defined $type) {
+    print type_to_string($type), " $task\n";
+    $desc = $TaskPars{$task}->{"description"};
+    if (defined $desc) {
+      print "     ($desc)\n";
+      }
+    elsif ($type eq "*") {
+      print "     (", join(", ", @{$TaskPars{$task}->{"subtasks"}}), ")\n"
+    }
+    else {
+      print "     [no description]\n";
+    }
+  }
+  else {
+    print "Task '$task' is not defined.\n";
+  }
+}
+sub type_to_string {
+  my $type = shift;
+  if ($type eq "s") {
+    return "SYNC";
+  }
+  elsif ($type eq "a") {
+    return "ARCH";
+  }
+  elsif ($type eq "*") {
+    return "MULT";
+  }
+  else {
+    return "????";
+  }
+}
+
+############################################################################
+## describe_task($name);
+##   print full description of a specific task
+sub describe_task {
+  my $task = shift;
+  my $type = $TaskType{$task};
+  if (not defined $type) {
+    print "Task '$task' is not defined.\n";
+    return;
+  }
+  my $pars = $TaskPars{$task};
+  print "\n", type_to_string($type), " $task  ";
+  if ($type eq "s") { 
+    if ($pars->{"mirror"} or $pars->{"download-mirror"}) { print "(mirror directory tree)\n\n"; }
+    else { print "(synchronize directory trees)\n\n"; } 
+  }
+  elsif ($type eq "a") { print "(backup or restore archive)\n\n" }
+  elsif ($type eq "*") { print "(execute multiple tasks)\n\n" }
+  else { print "(unknown)\n\n" }
+  print_var("Description", $pars->{"description"});
+  if ($type eq "*") {
+    print_var("Component tasks", $pars->{"subtasks"});
+  }
+  else {
+    print_var("Local directory", $pars->{"local-root"});
+    if ($pars->{"host"}) {
+      print_var("Remote host login", $pars->{"user"}.'@'.$pars->{"host"});
+    }
+    else {
+      print_var("Remote host login", "<local copy>");
+    }
+    print_var("Remote directory", $pars->{"remote-root"});
+    print_var("Only subdirectories", $pars->{"subdirs"});
+    print_var("Exclude files/dirs", $pars->{"exclude"});
+    print_var("Make backups (*~)", as_boolean($pars->{"backup"}));
+    if ($type eq "s") {
+      my $mirror_mode = "off";
+      $mirror_mode = "local => remote"  
+        if $pars->{"mirror"};
+      $mirror_mode = "local <= remote"
+        if $pars->{"download-mirror"};
+      print_var("Mirror mode", $mirror_mode);
+    }
+    print_var("Automatic exclusion", [@Excludes])
+      unless $pars->{"sync-all"};
+    my $do_extended = ($pars->{"extended"}) ? "+" : "-";
+    my $do_perm = ($pars->{"permissions"}) ? "+" : "-";
+    print_var("Preserve attributes", "${do_perm}permissions, ${do_extended}extended");
+  }
+  print "\n";
+}
+sub print_var {
+  my $var = shift;
+  my $value = shift;
+  my $print_all = shift;                        # print undefined values and empty lists, too
+  return
+    unless $print_all or defined $value;
+  $value = "UNDEFINED"
+    unless defined $value;
+  my $ref = ref $value;
+  if ($ref eq "ARRAY") {
+    return
+      unless $print_all or @$value > 0;
+    my @expanded = map {
+      (ref($_) eq "ARRAY") ? "<".join(", ", @$_).">" : $_
+    } @$value;
+    $value = "[".join(", ", @expanded)."]";
+  }
+  printf "  %-20s %s\n", "$var:", $value;
+}
+sub as_boolean {
+  my $value = shift;
+  return $value ? "yes" : "no";
+}
+
+############################################################################
+## $ok = yes_or_no("Are you sure?");
+##   ask for confirmation from user before performing dangerous actions
+sub yes_or_no {
+  my $prompt = shift;
+  $prompt = "Are you sure you want to continue ?"
+    unless defined $prompt;
+  print "$prompt (yes/no) ";
+  while (my $answer = <STDIN>) {
+    chomp $answer;
+    $answer = lc $answer;
+    if ("yes" eq $answer) {
+      return 1;
+    } elsif ("no" eq $answer or "n" eq $answer) {
+      return 0;
+    } else {
+      print "Please answer 'yes' or 'no': ";
+    }
+  }
+}
+
+############################################################################
+## @matches = match_tasks(@patterns);
+##   match one or more wildcard patterns against all tasks defined in config file
+##   and return sorted list of task names with duplicates removed
+sub match_tasks {
+  my @all_matches = ();                         # collect matches in hash to remove duplicates
+  foreach $pattern (@_) {
+    if ($pattern =~ /[*?]|^\/.*\/$|:.$/) {
+      my $regex = $pattern;    # convert pattern into valid regular expression
+      my $task_type = ($regex =~ s/:([sam*])$//i) ? lc($1) : "";
+      $task_type = "*"                          # match only specified task type with :s,:a,:m=:*
+        if $task_type eq "m";
+      if ($regex =~ s{^/(.+)/$}{$1}) { # match user-specified regular expression
+        print "USER-DEFINED REGEX: /$regex/\n"
+          if $Opt_Debug;
+      }
+      else {              # translate wildcard pattern into regular expression
+        $regex =~ s/([^*?]+)/quotemeta($1)/eg;
+        $regex =~ s/\?/./g;
+        $regex =~ s/\*+/.*/g;
+        $regex = "^$regex\$";
+        print "WILDCARD EXPAND: $pattern => /$regex/\n"
+          if $Opt_Debug;
+      }
+      my $rx = qr/$regex/;
+      my @matches =  sort {                          # sort by task type first, then task name
+        $TaskType{$b} cmp $TaskType{$a} or $a cmp $b
+      } grep {/$rx/} keys %TaskType;            # 
+      @matches = grep {$TaskType{$_} eq $task_type} @matches
+        if $task_type;
+      warn "WARNING: wildcard pattern $pattern does not match any tasks (ignored)\n"
+        unless @matches > 0;
+      push @all_matches, @matches;
+    }
+    else {
+      if (exists $TaskType{$pattern}) {
+        push @all_matches, $pattern;
+      }
+      else {
+        warn "WARNING: task $pattern is not defined (ignored)\n";
+      }
+    }
+  }
+  my %seen = ();                            # remove duplicate tasks from list
+  return grep { not $seen{$_}++ } @all_matches;
+}
+
+############################################################################
+## @tasks = expand_multi(@tasks);
+##   expand multi-tasks, removing duplicates introduced in the process
+sub expand_multi {
+  my @tasks = ();
+  foreach my $task (@_) {
+    my $type = $TaskType{$task};
+    if (defined $type) {
+      if ($type eq "*") {
+        push @tasks, @{$TaskPars{$task}->{"subtasks"}}
+      }
+      else {
+        push @tasks, $task;
+      }
+    }
+    else {
+      warn "WARNING: task $task is not defined (ignored)\n"
+    }
+  }
+  my $before = @Tasks;
+  my %seen = ();
+  @tasks = grep { not $seen{$_}++ } @tasks;
+  my $after = @Tasks;
+  printf "[%d duplicate tasks removed]\n", $before - $after
+    if $Opt_Verbose or $Opt_Debug;
+  return @tasks;
+}
+
+############################################################################
+## $ok = check_type($type, @tasks);
+##   check that all tasks have the specified type (issues error message otherwise)
+sub check_type {
+  my $type = shift;
+  my @wrong = grep {$TaskType{$_} ne $type} @_;
+  if (@wrong) {
+    my $tname = type_to_string($type);
+    my $other = type_to_string(($type eq "s") ? "a" : "s");
+    warn "ERROR: please specify $tname tasks only!\n",
+      "  ($other task(s): ".join(", ", @wrong).")\n";
+    return 0;
+  }
+  else {
+    return 1;
+  }
+}
+
+############################################################################
+## do_sync($task, ["push"|"pop"]);
+## do_push($task);
+## do_pop($task);
+##   process synchronization task $task (optionally in --push or --pop mode)
+##   (note that --push/--pop mode may be activated automatically for a mirror task)
+sub do_push { my $task = shift; do_sync($task, "push"); }
+sub do_pop  { my $task = shift; do_sync($task, "pop"); }
+sub do_sync {
+  my $Task = shift;
+  my $mode = (@_) ? lc(shift) : "";
+
+  my $type = $TaskType{$Task};
+  die "Internal error: wrong type '$type' for task $Task in do_sync().\n"
+    unless $type eq "s";
+  
+  ## determine local and remote root directories
+  my $pars = $TaskPars{$Task};
+  my $local_root = $pars->{"local-root"};
+  my $remote_root = $pars->{"remote-root"};
+  my $remote_user = $pars->{"user"};
+  my $remote_host = $pars->{"host"};
+  my $remote_prefix = "";
+  if ($remote_host) {
+    $remote_prefix = "$remote_user\@$remote_host:";
+  }
+  
+  $local_root =~ s/\/+$//;                      # remove trailing directory separators
+  $remote_root =~ s/\/+$//;                     # remove trailing directory separators
+  printf "SYNC %-14s ", $Task;
+  die "Error: local-root ($local_root) must be absolute path!\n"
+    unless $local_root =~ /^\//;
+  die "Error: remote-root ($remote_root) must be absolute path!\n"
+    unless $remote_root =~ /^\//;
+  print  "[ LOCAL:$local_root/ <=> REMOTE:$remote_root/ ]\n";
+
+  ## check for mirroring mode (automatic --push/--pop without confirmation) and whether directories can be created automatically
+  ## (this is only possible if the remote host is localhost and the remote user identical to the local user)
+  my $is_push_mirror = $pars->{"mirror"};
+  my $is_pop_mirror = $pars->{"download-mirror"};
+  my $create_dirs = $is_push_mirror && ($remote_host eq "localhost" || $remote_host eq "127.0.0.1") && $remote_user eq [getpwuid($UID)]->[0];
+  
+  ## make list of directory pairs that need to be synchronised (and check)
+  my @Subdirs = ["$local_root/", "$remote_root/"];
+  if (exists $pars->{"subdirs"}) {
+    @Subdirs = map {
+      my ($ld, $rd);
+      if (ref $_) {                             # (local, remote) directory pair
+        die "Error in configuration: subdirectory pair must be list with two elements.\n"
+          unless (ref $_ eq "ARRAY") and (2 == @$_);
+        ($ld, $rd) = @$_;
+      } else {                          # same subdirectory in local and remote tree
+        $ld = $rd = $_;
+      }
+      $ld =~ s/\/+$//;                  # remove leading ...
+      $ld =~ s/\/+$//;                  # remove leading ...
+      $ld =~ s/^\/+//;                  # ... and trailing directory separators
+      $rd =~ s/\/+$//;
+      $rd =~ s/^\/+//;
+      ["$local_root/$ld/", "$remote_root/$rd/"]
+    } @{$pars->{"subdirs"}};
+  }
+  map {                                 # check that all local directories exist
+    my $ld = $_->[0];
+    unless (-d $ld) {
+      warn "Error: local directory $ld does not exist.\n";
+      return 0;
+    }
+  } @Subdirs;
+
+  ## ask user to reconfirm -push or -pop operation
+  if ($mode) {
+    print "\n";
+    print "WARNING: This operation may overwrite and/or delete files\n";
+    print "         in the following directories:\n\n";
+    map { print "  ",($mode eq "push" ? "REMOTE:".$_->[1] : "LOCAL:".$_->[0]),"\n" } @Subdirs;
+    print "\n";
+    my $ok = yes_or_no();
+    if (not $ok) {
+      warn "Operation aborted.\n";
+      return 0;
+    }
+    print "\n";
+  }
+  ## auto-activate -push/-pop mode for mirror sync tasks, without user confirmation
+  else {
+    $mode = "push" if $is_push_mirror;
+    $mode = "pop" if $is_pop_mirror;
+  }
+      
+  ## process each directory pair in turn
+  foreach my $pair (@Subdirs) {
+    my ($ld, $rd) = @$pair;
+    die "Sorry, can't sync directory $ld (' not allowed in filename)\n"
+      if $ld =~ /'/;
+    die "Sorry, can't sync directory $rd (' not allowed in filename)\n"
+      if $rd =~ /'/;
+        if ($create_dirs and not -e $rd) {
+                ## if we're mirroring to localhost and the remote directory doesn't exist yet, create it automatically
+                print "[creating directory $rd on localhost]\n"
+                        if $Opt_Verbose;
+                mkpath($rd);
+        }
+
+    ## construct rsync system call
+    my $cmd = $Config{"rsync"}." --rsh='ssh -x'";
+    $cmd .= " --recursive --links --times";
+    unless ($pars->{"sync-all"} or $Opt_SyncAll) {
+      foreach my $pat (@Excludes) {
+        $cmd .= " --exclude='$pat'";
+      }
+    }
+    if (exists $pars->{"exclude"}) {
+      foreach my $pat (@{$pars->{"exclude"}}) {
+        $cmd .= " --exclude='$pat'";
+      }
+    }
+    $cmd .= " --dry-run --verbose"
+        if $Opt_DryRun;
+    $cmd .= " --stats --verbose"
+      if $Opt_Debug;
+    $cmd .= " --verbose --progress"
+      if $Opt_Verbose and not $Opt_DryRun;
+    $cmd .= " --perms"
+      if $pars->{"permissions"} and not $Opt_NoPerm;
+    $cmd .= " --extended-attributes"
+      if $pars->{"extended"} or $Opt_ExtendedAttributes;
+    ## execute rsync command with appropriate src and dest directories
+    if ($mode eq "push") {
+      print "  LOCAL -write-> REMOTE\n";
+      $cmd .= " --bwlimit=$Opt_UploadLimit"
+        if $Opt_UploadLimit > 0;
+      $cmd .= " --delete --delete-after '$ld' $remote_prefix'$rd'";
+      print "SYSTEM: $cmd\n"
+        if $Opt_Debug;
+      unless (0 == system $cmd) {
+        warn "Error: RSYNC command failed. Operation aborted.\n";
+        return 0;
+      }
+    } elsif ($mode eq "pop") {
+      print "  LOCAL <-write- REMOTE\n";
+      $cmd .= " --bwlimit=$Opt_DownloadLimit"
+        if $Opt_DownloadLimit > 0;
+      $cmd .= " --delete --delete-after $remote_prefix'$rd' '$ld'";
+      print "SYSTEM: $cmd\n"
+        if $Opt_Debug;
+      unless (0 == system $cmd) {
+        warn "Error: RSYNC command failed. Operation aborted.\n";
+        return 0;
+      }
+    } else {
+      $cmd .= " --update";
+      $cmd .= " --backup"                       # make backup files only when synchronising
+        if $pars->{"backup"};
+      print "  LOCAL --sync-> REMOTE\n";
+      my $cmd1 = $cmd; 
+      $cmd1 .= " --bwlimit=$Opt_UploadLimit"
+        if $Opt_UploadLimit > 0;
+      $cmd1 .= " '$ld' $remote_prefix'$rd'";
+      print "SYSTEM: $cmd1\n"
+        if $Opt_Debug;
+      unless (0 == system $cmd1) {
+        warn "Error: RSYNC command failed. Operation aborted.\n";
+        return 0;
+      }
+      print "  LOCAL <-sync-- REMOTE\n";
+      my $cmd2 = $cmd; 
+      $cmd2 .= " --bwlimit=$Opt_DownloadLimit"
+        if $Opt_DownloadLimit > 0;
+      $cmd2 .= " $remote_prefix'$rd' '$ld'";
+      print "SYSTEM: $cmd2\n"
+        if $Opt_Debug;
+      unless (0 == system $cmd2) {
+        warn "Error: RSYNC command failed. Operation aborted.\n";
+        return 0;
+      }
+    }
+  }
+  print "\n";
+  return 1;
+}
+
+############################################################################
+## do_backup($task);
+## do_restore($task);
+##   backup or restore archive $task
+sub do_backup  { my $task = shift; do_archive($task, 0); }
+sub do_restore { my $task = shift; do_archive($task, 1); }
+sub do_archive {
+  my $Task = shift;
+  my $restore = shift;
+
+  my $type = $TaskType{$Task};
+  die "Internal error: wrong type '$type' for task $Task in do_sync().\n"
+    unless $type eq "a";
+
+  ## determine archive directories and parent directory where tar is executed
+  my $pars = $TaskPars{$Task};
+  my $local_root = $pars->{"local-root"};
+  my $remote_root = $pars->{"remote-root"};
+  my $remote_prefix = "";
+  if ($pars->{"host"}) {
+    $remote_prefix = $pars->{"user"}.'@'.$pars->{"host"}.":";
+  }
+  $local_root =~ s/\/+$//;                      # remove trailing directory separators
+  $remote_root =~ s/\/+$//;                     # remove trailing directory separators
+  printf "ARCH %-14s ", $Task;
+  die "Error: local-root ($local_root) must be absolute path!\n"
+    unless $local_root =~ /^\//;
+  die "Error: remote-root ($remote_root) must be absolute path!\n"
+    unless $remote_root =~ /^\//;
+  print "[ backup of $local_root/ ]\n";
+  $local_root =~ /(.+)\/(.+?)$/
+    or die "Error: can't backup toplevel directory.\n";
+  my $base_dir = $1;
+  my $subdir = $2;
+  ## make list of subdirectories (or files) for backup
+  my @Subdirs = $subdir;
+  if (exists $pars->{"subdirs"}) {
+    @Subdirs = map { s/\/+$//;          # remove leading trailing directory separators
+                     s/^\/+//;
+                     "$subdir/$_";
+                   } @{$pars->{"subdirs"}};
+  }
+  my $tgz_name = $Task."__".$local_root.".tar.gz"; # name of .tgz archive is derived from local-root
+  $tgz_name =~ tr[/][-];
+  $tgz_name =~ s/_-/_/g;
+  my $tempfile = "/tmp/$tgz_name"; # temporary location for .tgz archive (on local host)
+
+  ## perform --backup operation (create .tgz archive and copy to remote host)
+  if (not $restore) {
+    print "SYSTEM: cd $base_dir/\n"
+      if $Opt_Debug;
+    chdir $base_dir
+      or die "Error: can't change to base directory $base_dir/\n";
+    foreach my $dir (@Subdirs) {
+      unless (-e $dir) {
+        warn "Error: directory or file $base_dir/$dir does not exist. Aborted.\n";
+        return 0;
+      }
+    }
+    unlink $tempfile
+      if -f $tempfile;
+    ## create .tgz archive with requested directories
+    my $cmd = $Config{"tar"}." cfz $tempfile";
+    unless ($pars->{"sync-all"} or $Opt_SyncAll) {
+      foreach my $pat (@Excludes) {
+        $cmd .= " --exclude='$pat'";
+      }
+    }
+    if (exists $pars->{"exclude"}) {            # note that tar uses slightly different semantics than rsync
+      foreach my $pat (@{$pars->{"exclude"}}) {
+        $cmd .= " --exclude='$pat'";
+      }
+    }
+    foreach (@Subdirs) {
+      die "Sorry, can't back up directory $_ (' not allowed in filename)\n"
+        if /'/;
+    }
+    @Subdirs = map {"'$_'"} @Subdirs; # in case paths contain blanks
+    $cmd .= " @Subdirs";
+    print "[wrapping $local_root/]\n"
+      if $Opt_Verbose;
+    print "SYSTEM: $cmd\n"
+      if $Opt_Debug;
+    if (system $cmd) {
+      unlink $tempfile;
+      warn "Error: TAR command failed. Aborted.\n";
+      return 0;
+    }
+    chmod 0600, $tempfile;                      # backups are usually private
+    ## now copy archive to remote host
+    my @l = stat $tempfile;                     # show date and time of backup
+    my $date = $l[9];
+    my $date_str = localtime $date;
+    my $size = $l[7];
+    my $mb_size = sprintf("%4.2f", $size / (1024 * 1024));
+    print "  LOCAL --back-> REMOTE  [$date_str, $mb_size MB]\n";
+    $cmd = $Config{"rsync"}." --rsh='ssh -x' --perms --times";
+    $cmd .= " --backup"
+      if $pars->{"backup"};
+    $cmd .= " --dry-run --verbose"
+      if $Opt_DryRun;
+    $cmd .= " --stats --verbose"
+      if $Opt_Debug;
+    $cmd .= " --verbose --progress"
+      if $Opt_Verbose and not $Opt_DryRun;
+    $cmd .= " --perms"
+      if $pars->{"permissions"} and not $Opt_NoPerm;
+    $cmd .= " --bwlimit=$Opt_UploadLimit"
+      if $Opt_UploadLimit > 0;
+    $cmd .= " $tempfile $remote_prefix$remote_root";
+    print "SYSTEM: $cmd\n"
+      if $Opt_Debug;
+    unless (0 == system $cmd) {
+      warn "Error: RSYNC command failed. Operation aborted.\n";
+      return 0;
+    }
+    ## remove .tgz archive from its temporary location
+    unlink $tempfile;
+  }
+  ## perform --restore operation (retrieve .tgz archive from remote host and unpack it)
+  else {
+    ## download archive from remote host
+    unlink $tempfile
+      if -f $tempfile;
+    print "  LOCAL <-rest-- REMOTE\n";
+    my $cmd = $Config{"rsync"}." --rsh='ssh -x' --times";
+    $cmd .= " --stats --verbose"
+      if $Opt_Debug;
+    $cmd .= " --verbose --progress"
+      if $Opt_Verbose;
+    $cmd .= " --perms"
+      if $pars->{"permissions"} and not $Opt_NoPerm;
+    $cmd .= " --bwlimit=$Opt_DownloadLimit"
+      if $Opt_DownloadLimit > 0;
+    $cmd .= " $remote_prefix$remote_root/$tgz_name $tempfile";
+      print "SYSTEM: $cmd\n"
+        if $Opt_Debug;
+    unless (0 == system $cmd) {
+      warn "Error: RSYNC command failed. Operation aborted.\n";
+      return 0;
+    }
+    my @l = stat $tempfile;                     # show date and time of backup
+    my $date = $l[9];
+    my $date_str = localtime $date;
+    my $size = $l[7];
+    my $mb_size = sprintf("%4.2f", $size / (1024 * 1024));
+    print "[archive from $date_str, $mb_size MB]\n"
+      if $Opt_Verbose;
+    ## list directories/files to restore and check if they already exist
+    print "SYSTEM: cd $base_dir/\n"
+      if $Opt_Debug;
+    chdir $base_dir
+      or die "Error: can't change to base directory $base_dir/\n";
+    print "\n";
+    print "The following directories and/or files will be restored\n";
+    print "to their state on $date_str:\n";
+    print "\n";
+    my $N_existing = 0;                         # number of existing directories/files
+    foreach my $subdir (@Subdirs) {
+      if (-d $subdir or -f $subdir) {
+        $N_existing++;
+        print "  [*] ";
+      }
+      else {
+        die "Error: $base_dir/$subdir exists,\n",
+          "but is neither a plain file nor a directory??? Aborted.\n"
+            if -e $subdir;
+        print "      ";
+      }
+      print "$base_dir/$subdir\n";
+    }
+    if ($N_existing > 0) {
+      print "\n";
+      print "The items marked [*] already exist. It is highly recommended that\n";
+      print "you back up and delete existing directories and files manually.\n";
+      print "If you continue now, I will try only to replace deleted files.\n";
+      print "Remove corrput files manually to restore them from the backup.\n";
+    }
+    print "\n";
+    $ok = yes_or_no();
+    if (not $ok) {
+      unlink $tempfile;
+      warn "Operation aborted.\n";
+      return 0;
+    }
+    ## unpack .tgz archive
+    $cmd = $Config{"tar"}." ";
+    if ($Opt_DryRun) {
+      $cmd .= "d";
+    }
+    else {
+      $cmd .= "x";
+      $cmd .= "p"
+        if $pars->{"permissions"} and not $Opt_NoPerm;
+    }
+    $cmd .= "k"
+      if $N_existing > 0;
+    $cmd .= "v"
+      if $Opt_Verbose;
+    $cmd .= "zf $tempfile";
+    $cmd .= " 2>/dev/null"                      # hide error messages caused by existing files
+      if $N_existing > 0;
+    print "[restoring $local_root]\n";
+    print "SYSTEM: $cmd\n"
+      if $Opt_Debug;
+    my $status = system "$cmd";
+    unlink $tempfile;
+    if ($status != 0 and not ($Opt_DryRun or $N_existing > 0)) {
+      warn "Error: TAR command failed. Aborted.\n";
+      return 0;
+    }
+    print "Restore operation successful.\n";
+  }
+  print "\n";
+  return 1;
+}
+
+############################################################################
+##
+## some subroutines and interface functions for the configuration file,
+## which need to be defined before ~/.HotSync is read in
+##
+BEGIN {
+  ## internal utility functions
+  sub args_to_hash {                            # store key => value pairs in hashref, with basic error checking
+    my $arghash = {};
+    croak "Syntax error: arguments must be key => value pairs.\n"
+      unless (@_ % 2) == 0;
+    while (@_) {
+      my $par = shift @_;
+      croak "Syntax error: '$par' parameter specified twice.\n"
+        if exists $arghash->{$par};
+      $arghash->{$par} = shift @_;
+    }
+    return $arghash
+  }
+
+  sub check_invalid_parameters {                # check arghash for invalid (i.e. any remaining) parameters
+    my $arghash = shift;
+    my $caller = shift;
+    my @args = keys %$arghash;
+    if (@args) {
+      my $error_string = "Syntax error: invalid parameter".(@args > 1 ? "s" : "")." ".join(", ", map {"'$_'"} @args);
+      $error_string .= " in $caller"
+        if defined $caller;
+      croak "$error_string\n";
+    }
+  }
+
+  sub check_local_parameters {                  # ensure that all required parameters (without default values) are set
+    my $caller = shift;
+    my @extra_args = @_;
+    my @missing = ();
+    foreach my $arg (keys %GlobalState, @extra_args) {
+      push @missing, $arg
+        unless defined $LocalState{$arg};
+    }
+    if (@missing) {
+      my $pl = (@missing > 1);
+      my $error_string = "Error: required parameter".($pl ? "s" : "")." ".join(", ", map {"'$_'"} @missing)." ".
+        ($pl ? "are" : "is")." missing";
+      $error_string .= " in $caller"
+        if defined $caller;
+      croak "$error_string\n";
+    }
+  }
+
+  sub filter_global_parameters {                # process global parameters in arghash; returns hash with remaining args
+    %LocalState = %GlobalState;                 # intialise local state
+    my $arghash = shift;
+    foreach my $par (keys %LocalState) {
+      if (exists $arghash->{$par}) {
+        $LocalState{$par} = delete $arghash->{$par};
+      }
+    }
+    return $arghash;
+  }
+
+  ## interface functions
+  sub Config {
+    my $args = args_to_hash(@_);
+    foreach my $par (keys %Config) {
+      if (exists $args->{$par}) {
+        $Config{$par} = delete $args->{$par};
+      }
+    }
+    check_invalid_parameters($args, "Config()");
+    return $NumTasks;
+  }
+
+  sub Global {
+    my $args = filter_global_parameters(args_to_hash(@_));
+    check_invalid_parameters($args, "Global()");
+    %GlobalState = %LocalState;                 # update global state
+    return $NumTasks;
+  }
+
+  sub Sync {
+    my $task = shift;
+    my $args = filter_global_parameters(args_to_hash(@_));
+    foreach my $par (qw<local-root remote-root description mirror download-mirror>) { # scalar parameters
+      my $val = delete $args->{$par};
+      if (defined $val) {
+        croak "Error: value of '$par' parameter must be a string or number.\n"
+          if ref $val;
+        $LocalState{$par} = $val;
+      }
+    }
+    foreach my $par (qw<subdirs exclude>) {     # list parameters
+      my $val = delete $args->{$par};
+      if (defined $val) {
+        croak "Error: value of '$par' parameter must be an anonymous list.\n"
+          unless ref $val eq "ARRAY";
+        $LocalState{$par} = $val;
+      }
+    }
+    check_invalid_parameters($args, "Sync()");
+    check_local_parameters("Sync()", qw<local-root remote-root>);
+    croak "Error: task '$task' defined twice.\n"
+      if exists $TaskType{$task};
+    croak "Error: task '$task' cannot set both 'mirror' and 'download-mirror'.\n"
+      if $LocalState{"mirror"} and $LocalState{"download-mirror"};
+    $TaskType{$task} = "s";
+    $TaskPars{$task} = {%LocalState};
+    return ++$NumTasks;
+  }
+
+  sub Archive {
+    my $task = shift;
+    my $args = args_to_hash(@_);
+    $args = filter_global_parameters($args);
+    foreach my $par (qw<local-root remote-root description>) { # scalar parameters
+      my $val = delete $args->{$par};
+      if (defined $val) {
+        croak "Error: value of '$par' parameter must be a string.\n"
+          if ref $val;
+        $LocalState{$par} = $val;
+      }
+    }
+    foreach my $par (qw<subdirs exclude>) {     # list parameters
+      my $val = delete $args->{$par};
+      if (defined $val) {
+        croak "Error: value of '$par' parameter must be an anonymous list.\n"
+          unless ref $val eq "ARRAY";
+        $LocalState{$par} = $val;
+      }
+    }
+    check_invalid_parameters($args, "Archive()");
+    check_local_parameters("Archive()", qw<local-root remote-root>);
+    croak "Error: task '$task' defined twice.\n"
+      if exists $TaskType{$task};
+    $TaskType{$task} = "a";
+    $TaskPars{$task} = {%LocalState};
+    return ++$NumTasks;
+  }
+
+  sub Multi {
+    my $task = shift;
+    my $args = args_to_hash(@_);
+    $args = filter_global_parameters($args);
+    foreach my $par (qw<description>) { # scalar parameters
+      my $val = delete $args->{$par};
+      if (defined $val) {
+        croak "Error: value of '$par' parameter must be a string.\n"
+          if ref $val;
+        $LocalState{$par} = $val;
+      }
+    }
+    foreach my $par (qw<subtasks>) {    # list parameters
+      my $val = delete $args->{$par};
+      if (defined $val) {
+        croak "Error: value of '$par' parameter must be an anonymous list.\n"
+          unless ref $val eq "ARRAY";
+        $LocalState{$par} = $val;
+      }
+    }
+    check_invalid_parameters($args, "Multi()");
+    check_local_parameters("Multi()", qw<subtasks>);
+    croak "Error: task '$task' defined twice.\n"
+      if exists $TaskType{$task};
+    $TaskType{$task} = "*";
+    $TaskPars{$task} = {%LocalState};
+    return ++$NumTasks;
+  }
+
+  sub Delete {
+          foreach my $task (@_) {
+                  croak "Error: can't Delete() non-existent task '$task'.\n"
+                          unless $TaskType{$task};
+                  delete $TaskType{$task};
+                  delete $TaskPars{$task};
+                  $NumTasks--;
+          }
+          return $NumTasks;
+  }
+}
+
+
+
+__END__
+
+=head1 NAME
+
+HotSync - Synchronize data with remote host
+
+=head1 SYNOPSIS
+
+  HotSync --list [Task ...]
+  HotSync [OPTIONS] [--push | --pop] SyncTask ...
+  HotSync [OPTIONS] --backup  ArchiveTask ...
+  HotSync [OPTIONS] --restore ArchiveTask ...
+  HotSync --interactive
+  HotSync [--help | --doc]
+
+=head1 OPTIONS
+
+=over 4
+
+=item -h, --help
+
+Display usage and options summary (call B<HotSync> without arguments for
+shorter help message).
+
+=item -p, --perldoc, --doc
+
+Display embedded POD documentation (with B<perldoc>).
+
+=item -V, --version
+
+Show software version.
+
+=item -i, --interactive
+
+Start B<HotSync> in interactive mode (requires B<Term::ReadLine::Gnu>).
+
+=item -l, --list
+
+List tasks matching the specified patterns, or all tasks defined in the
+configuration file (without command-line arguments).  Combine with C<--verbose> 
+for full descriptions of the tasks.
+
+=item -n, --dry-run
+
+Show what I<would> have been done, without transferring any files.
+
+=item -v, --verbose
+
+Be moderatly verbose during data preparation and transfer (also see C<--list> above).
+
+=item -a, --all
+
+Synchronize / back up certain file types that are normally excluded,
+overriding the settings in the configuration file.
+
+=item -ul I<n>, --upload-limit=I<n>
+
+Limit network bandwidth for file uploads to I<n> KBps (kilobytes per second).
+
+=item -dl I<n>, --download-limit=I<n>
+
+Limit network bandwidth for file downloads to I<n> KBps (kilobytes per second).
+
+=item -f I<file>, --config-file=I<file>
+
+Read B<HotSync> configuration from I<file> rather than the default F<~/.HotSync>. 
+
+=item -np, --no-permissions
+
+Don't attempt to preserve file access permissions.  This option is needed when synchronising with a file system that does not support permissions (e.g. on an external hard disk or network drive).
+
+=item -E, --extended-attributes
+
+Preserve Max OS X extended attributes (resource forks, ACLs, metadata). Can only be used when copying files between two machines running Mac OS X and Apple's patched C<rsync> binary.
+
+=item -d, --debug
+
+Displays lots of debugging messages (for troubleshooting only).
+
+=back
+
+
+=head1 DESCRIPTION
+
+The B<HotSync> program synchronises directory trees between the
+B<local host> (the computer where HotSync is installed) and a B<remote
+host>. It can also be used to create backup archives and transfer them
+to a location on the remote host.
+
+B<HotSync> is usually invoked from the command line, specifying one or more of
+the tasks defined in the global configuration file (see L</CONFIGURATION FILE>
+for details).  The shell wildcards C<*> and C<?> can be used to select groups
+of tasks.  Alternatively, tasks can be matched against a Perl regular
+expression enclosed in slashes (e.g. C</[A-Z]{3}/> matches all tasks that
+contain a sequence of at least three uppercase letters).  Add the modifier
+C<:s>, C<:a> or C<:m> to a pattern to match only synchronization (C<:s>),
+archive (C<:a>) or multi (C<:m>) tasks (multi tasks combine several sub-tasks
+under a single name).  Note that all requested tasks must be of the same type
+(i.e. either synchronisation or archive tasks) after multi tasks have been
+expanded.
+
+Alternatively, you can invoke an interactive B<HotSync> console with the
+C<--interactive> (or C<-i>) option, provided that the B<Term::ReadLine::Gnu>
+module is available.  This mode provides an interactive environment with
+automatic completion of commands and task names.  Type C<help> for a brief
+listing of available commands, which correspond to the command-line operations
+described below (as well as the C<--verbose> and C<--dry-run> options).
+
+=head2 Listing tasks
+
+The C<--list> flag can be used to display short descriptions of the
+selected tasks (without executing them), which is particularly useful
+in connection with the C<*> wildcard.
+
+  HotSync --list [Task ...]
+
+If no tasks are specified after the C<--list> flag, B<HotSync> will
+show all tasks defined in the configuration file.
+
+B<Sync tasks> are marked SYNC in the task listing, and B<archive
+tasks> are marked ARCH.  There are also so-called B<multi tasks>,
+which are used to group several (simple) tasks under a single name (an
+alternative is to use the C<*> wildcard together with an appropriate
+naming scheme). Multi tasks are marked MULTI in the listing, and as a
+description their component tasks are displayed.
+
+In combination with the C<--verbose> option, full descriptions of the task are
+printed, as defined in the global configuration file.
+
+I<Interactive mode:> commands C<list> (for brief listing) and C<describe> (for
+full description).
+
+=head2 Synchronisation
+
+  HotSync [OPTIONS] SyncTask ...
+
+The basic form of the sync command synchronises files between two
+(complete) directory trees (on the local and remote host).  Any files
+existing only in one of the trees will be copied to the other tree.
+When a file exists in different versions on the local and remote host,
+the newer version (as indicated by its time stamp) will overwrite the
+older one.
+
+Certain file types (as determined by the filename extension), which
+are considered temporary files, are not synchronised unless this is
+specifically requested in the configuration file for the task at hand
+(or with the C<--all> command-line option).  The configuration file
+may also exclude further file types or individual files from the
+synchronisation process (see L</CONFIGURATION FILE> for details).
+
+  HotSync [OPTIONS] --push SyncTask ...
+
+With the C<--push> flag, the directory tree on the remote host is
+updated to an exact match of the tree on the local host. Files on the
+remote host will be overwritten even if they are newer than the
+version on the local host. Files and directories that do not exist on
+the local host will be deleted from the remote host. This form of the
+sync command is useful to copy a new directory tree to the remote
+host, and when substantial changes (including deletions) have been
+made to the tree on the local host.
+
+Since a C<--push> operation may lead to loss of data, B<HotSync> will
+ask the user for confirmation before the operation is executed.
+
+  HotSync [OPTIONS] --pop  SyncTask ...
+
+As the converse of C<--push>, the C<--pop> flag updates the local host from
+the remote host.
+
+I<Interactive mode:> command C<sync> with optional flags C<sync -push> and C<sync -pop>.
+
+=head2 Backup and Restore
+
+
+  HotSync [OPTIONS] --backup  ArchiveTask ...
+
+The backup command wraps a complete directory tree in a compressed TAR
+archive, which is then transferred to a (hopefully) safe place on the remote
+host. As with synchronisation, certain file types are automatically excluded,
+and further excludes may be defined in the configuration file.
+
+
+  HotSync [OPTIONS] --restore ArchiveTask ...
+
+The restore command is intended to restore a directory tree after complete
+loss of data, i.e. it assumes that the tree does no longer exist on the local
+host.  Otherwise, a warning message is issued, and B<HotSync> will only
+replace missing files if the user chooses to continue. Therefore, corrupted
+and truncated files should be deleted before running the restore command.
+
+I<Interactive mode:> commands C<backup> and C<restore>.
+
+
+=head1 INSTALLATION
+
+=head2 Prerequisites
+
+Since you can read this documentation, you obviously have a Perl interpreter.
+HotSync was designed for B<Perl 5.6.1>, but it should be compatible with
+earlier versions of Perl5 as well (you may have to install some additional
+libraries, though).  HotSync is a user-friendly front-end to the B<rsync>
+program, which must be installed both on the local I<and> the remote
+host. Rsync itself uses an B<ssh> connection for data transfer, so a suitable
+ssh implementation must be installed as well (more specifically, an ssh client
+must be available on the local host, and the remote host must allow ssh
+login).  If you want to use the interactive HotSync console, you also have to
+install the B<Term::ReadLine::Gnu> package.
+
+=head2 Installation Procedure
+
+In order to install the B<HotSync> script itself, adjust the path to
+the perl interpreter on the first line if necessary. Then copy the
+script (with C<cp -p>) to a suitable directory in your search path
+(usually C</usr/local/bin> for a global installation, or C<~/bin> for
+a personal installation). Type C<rehash> to make the script available
+to the current shell session.
+
+It is recommended that you enable RSA authentication for B<ssh> connections
+(otherwise you may have to enter your password repeatedly during
+synchronisation). First, run C<ssh-keygen -t rsa> I<on the local host>, which
+will create a public key in C<~/.ssh/id_rsa.pub>.  Then copy this file to
+C<~/.ssh/authorized_keys> I<on the remote host>. If that file already exists,
+append your public key to it. Note that the C<authorized_keys> file must be
+world-readable (mode C<644>). To test the RSA authentication, type C<ssh
+remote_host>, which should now establish an ssh session without asking for
+your password.  (If you have an old version of B<ssh> that accepts only
+protocol version 1, you may have to omit the C<-t rsa> flag. In this case,
+B<ssh-keygen> will create the public key in C<~/.ssh/identity.pub>.)
+
+Finally, you have to create a personal HotSync configuration file
+named F<~/.HotSync>. This file defines synchronisation and backup
+tasks that HotSync will perform. See the following section for a
+detailed description of the file format. Note that F<~/.HotSync> must
+contain valid Perl code. To enable proper syntax highlighting in
+emacs, the first line of the file should read
+
+  # -*-cperl-*-
+
+=head2 Important Notice
+
+Since the B<rsync> program uses time stamps to synchronise data (i.e.,
+when a file exists in different versions on the local and remote host,
+the older version will be overwritten with the newer one), it is
+important to keep the local time on both computers synchronised. It is
+recommended to update the computers' clocks regularly from a time
+server, e.g. with the B<ntpdate> utility (which must be executed by
+the root user).
+
+
+
+=head1 CONFIGURATION FILE
+
+The B<HotSync> configuration file is a small Perl program that
+registers synchronisation, archive, and multi tasks by calling the
+predefined B<Sync()>, B<Archive()>, and B<Multi()> functions.  Two
+additional functions, B<Global()> and B<Config()>, are used to set
+configuration variables.  The configuration file must be stored in the
+user's home directory under the name F<~/.HotSync>.  To enable proper
+syntax highlighting in emacs, the first line of the file should read
+
+  # -*-cperl-*-
+
+All predefined functions take lists of named parameters, some of which
+are optional.  The prototypes below show all parameters accepted by
+each function, while real usage examples will almost always omit some
+of them.  Note that the global options (i.e. the arguments accepted by
+B<Global()>) can also be passed to the B<Sync()>, B<Archive()>, and
+B<Multi()> functions in order to override the global settings
+temporarily.
+
+  Config( "tar" => "tar",
+          "rsync" => "rsync" );
+
+B<HotSync> relies on the B<rsync> program for synchronizing data between the
+local and remote host, and on GNU B<tar> for wrapping and unpacking backup
+archives.  If these tools are not installed under the standard names or in the
+standard paths, you have to set the corresponding config variables.  A fairly
+common case is that GNU B<tar> is installed under the name C<gtar> because the
+operating system ships with a different version.
+
+  Global( "host"     => "<name of remote host>",
+          "user"     => "<username for login on remote host>",
+          "backup"   => 1,
+          "sync-all" => 0,
+          "permissions" => 1,
+          "extended" => 0 );
+
+Use the C<Global()> function for global parameters that apply both to
+synchronization and to archive tasks.  These settings will be used for all
+following task definitions until they are changed with another C<Global()>
+function call.  The mandatory B<host> and B<user> parameter specify the name
+of the remote host and the account to which B<HotSync> will connect.  In order
+to synchronise files with a local volume (for the same user account), set 
+B<host> to an empty string.  This should speed up file transfer, but will no
+longer display progress messages (with C<-v> option).
+If B<backup> is B<true>, previous versions of updated files will be saved in
+files ending with C<~> (recommended for safety reasons, but may consume large
+amount of disk space).  By default, various types of temporary and generated
+files are excluded from synchronization and backups.  Set the B<sync-all>
+parameter to B<true> if you want to synchronize/backup these file types as
+well.  By default, B<HotSync> attempts to preserve file access permissions
+when copying files.  Set B<permission> to B<false> in order to disable this.
+The B<extended> option can only be used when copying files between two 
+machines running Mac OS X and Apple's patched B<rsync> binary. If set to 
+B<true>, extended attributes (such as resource forks and metadata) will be
+preserved in the copy. This setting can be overriden with the C<-E> command-line
+option.
+
+  Sync( "<name of task>",
+        "description" => "<short description of task>",
+        "local-root"  => "<root of directory tree on local host>",
+        "remote-root" => "<root of directory tree on remote host>",
+        "subdirs"     => ["<dir1>", "<dir2>", ... ],
+        "exclude"     => ["<pattern1>", "<pattern2>", ... ].
+        "mirror"      => 0,
+        "download-mirror" => 0,
+      );
+
+The C<Sync()> function defines a B<sychronization task>, which synchronizes a
+directory tree between the local and remote host.  Files that are missing from
+one of the trees are copied from the other tree.  If a file exists in both
+trees but in different version, the newer version will be used to replace the
+older one.  Note that the local tree can be copied to the remote host
+(possibly deleting files there) when the synchronization task is invoked with
+the C<-push> flag, and vice versa with the C<-pop> flag.  When the B<mirror>
+parameter is set to 1 (or any other true value), the synchronization is
+automatically carried out in C<-push> mode, I<without asking the user for confirmation>.
+This behaviour is intended for mirroring local directory trees on a remote server
+or external drive, mostly for backup purposes (especially when the trees are very 
+large so that wrapping them in a Tar archive would be too wasteful).  Note that
+when mirroring to localhost, the remote root directory will be automatically created
+if it does not exist.  If the B<download-mirror> parameter is set, the synchronization
+is carried out in C<-pop> mode; this option is useful for creating local mirrors
+of remote servers (e.g. a project Web site at SourceForge).
+
+The only required parameters are a short description of the task
+(B<description>), the root directory of the tree on the local host
+(B<local-root>) and the root directory of the tree on the remote host
+(B<remote-root>).  If the B<subdirs> parameter is specified, it must be an
+array reference containing a list of subdirectories (relative to the local and
+remote root of the directory tree) to be synchronized.  All other files and
+directories in the tree will be ignored.  You can also specify directory pairs
+C<< [<local-dir>, <remote-dir>] >> in this list when the names of
+subdirectories differ on the local and remote machine.  Alternatively, you can
+explicitly exclude files and directories from the synchronization with a list
+of patterns in the B<exclude> parameter (see the B<rsync> manual for details
+on the pattern syntax).
+
+Note that the name of the task has to be specified as the first argument of
+the C<Sync()> function rather than as a named parameter.  All parameters of
+the C<Global()> function can be specified as well, which will override their
+global values for this task.
+
+  Archive( "<name of task>",
+           "description" => "<short description of task>",
+           "local-root"  => "<root of directory tree on local host>",
+           "remote-root" => "<backup directory on remote host>",
+           "subdirs"     => ["<dir1>", "<dir2>", ... ],
+           "exclude"     => ["<pattern1>", "<pattern2>", ... ] );
+
+The C<Archive()> function defines a B<backup archive task>, wrapping up a
+directory tree on the local host in a compressed B<tar> archive, which is then
+backed up on the remote host.  The parameters of C<Archive()> correspond to
+those of C<Sync()>, with the following exceptions: (i) B<remote-root> does not
+refer to the root of a directory tree but to a directory on the remote host
+where the compressed archive will be backed up; (ii) B<subdirs> does not
+accept directory pairs; (iii) the syntax of file and directory patterns in
+B<exclude> is slightly different from the syntax used by synchronization tasks
+(see the GNU B<tar> manual for details).
+
+  Multi( "<name of task>",
+         "description" => "<short description of task>",
+         "subtasks"    => ["<name1>", "<name2>", ... ] );
+
+The C<Multi()> function defines a B<multi taks>, which collects a number of
+related tasks under a single name so they can be invoked conveniently.  The
+only relevant parameter is B<subtasks>, which specifies the names of the
+individual tasks to be invoked.  Note that all subtasks must be of the same
+type (either synchronization or backup archive), which is checked when parsing
+the configuration file.  It is also not allowed to nest multi tasks recursively
+(i.e. to specify one or more multi tasks in the B<subtasks> parameter).
+
+Individual tasks can be deleted with
+
+  Delete( "<task 1>", "<task 2>", ... );
+
+e.g. as an easy way to disable them temporarily, or when multiple tasks are
+defined automatically by a subroutine (e.g. backups on different remote hosts)
+and some of these should be excluded (e.g. because of insufficient disk space
+on the backup drive).
+
+See F<sample.HotSync> included in the B<HotSync> distribution for an annotated
+example of a configuration file.  For a quick start, edit this file according
+to your requirements, then copy it to F<~/.HotSync>.
+
+
+=head1 Bash completion
+
+Use the following code snippet to set up command-line completion for
+HotSync tasks and arguments in the C<bash> shell:
+
+    _HotSync_complete() 
+    {
+        local cur prev opts tasks
+        COMPREPLY=()
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev="${COMP_WORDS[COMP_CWORD-1]}"
+        opts="-h --help -p --perldoc --doc -V --version -i --interactive -l --list -n --dry-run -v --verbose -a --all -ul --upload-limit= -dl --download-limit= -f --config-file= -np --no-permissions -E --extended-attributes -d --debug"
+
+        if [[ ${cur} == -* ]] ; then
+            COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+            return 0
+        fi
+
+        tasks="`HotSync -l | awk '$1 ~ /^(SYNC|ARCH|MULTI)$/ {print $2}'`"
+        COMPREPLY=( $(compgen -W "${tasks}" -- ${cur}) )
+    }
+    complete -F _HotSync_complete HotSync
+
+
+=head1 COPYRIGHT
+
+This software is provided AS IS and the author makes no warranty as to
+its use and performance. You may use the program, redistribute and
+modify it under the same terms as Perl itself.
+
+IN NO EVENT WILL THE AUTHOR BE LIABLE TO YOU FOR ANY CONSEQUENTIAL,
+INCIDENTAL OR SPECIAL DAMAGES, INCLUDING ANY LOST PROFITS OR LOST
+SAVINGS, EVEN IF HE HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGES, OR FOR ANY CLAIM BY ANY THIRD PARTY.
+
+Copyright (C) 2004-2011 by Stefan Evert (L<http://purl.org/stefan.evert>).
+
+=cut
+

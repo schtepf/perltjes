@@ -1,0 +1,441 @@
+#!/usr/bin/perl -w
+# -*-cperl-*-
+###################################################################
+###                                                             ###
+###    Author: Stefan Evert                                     ###
+###   Purpose: Format selected bibTeX entries                   ###
+###                                                             ###
+###################################################################
+# 
+# 
+# 
+$| = 1;
+
+# use sigtrap 'handler' => sub { die "Signal caught. Exiting.\n" }, qw<normal-signals>;
+
+use FileHandle;
+use Getopt::Long qw/:config no_ignore_case/;
+use HTML::Entities;
+use Encode;
+
+$Output = "-";       # name of output file (default: print on stdout)
+$Format = "bib";     # default format: standard latex (other --html, --pod, --creole)
+$Style = "natbib";   # default style: natbib
+@BIB = ();           # bibtex database files (default: all .bib files in search path)
+$SingleLine = 0;     # format each entry as a single text line
+$UTF8 = 0;           # convert output to UTF-8
+$List = 0;           # list matching bibtex keys only (no output)
+$Quiet = 0;          # suppress non-fatal warning
+$Verbose = 0;        # show some progress information & warn about duplicate keys
+$Debug = 0;          # show debugging messages & output of external programs
+$Help = 0;           # show help page?
+
+$ok = GetOptions(
+                 "output|o=s" => \$Output,
+                 "style|s=s" => \$Style,
+                 "database|D=s" => \@BIB,
+                 "html" => sub {$Format = "html"},
+                 "text" => sub {$Format = "ascii"},
+                 "pod" => sub {$Format = "pod"},
+                 "latex" => sub {$Format = "tex"},
+                 "creole" => sub {$Format = "creole"},
+                 "S|single|single-line" => \$SingleLine,
+                 "utf8" => \$UTF8,
+                 "list|l" => \$List,
+                 "verbose|v" => \$Verbose,
+                 "quiet|q" => \$Quiet,
+                 "debug|d" => \$Debug,
+                 "help|h" => \$Help,
+                 );
+$Verbose = 1
+  if $Debug;                                    # -d implies -v
+
+die "\nUsage:  bibformat [options] <entry> ... \n\n",
+  "This program extracts one or more bibtex entries from a .bib file\n",
+  "and formats them using a specified LaTeX bibstyle (default: natbib).\n",
+  "Entries are selected by specifying one or more bibtex keys either\n",
+  "as literal strings or as regular expressions enclosed in slashes.\n",
+  "Note that formatting (except for latex) is far from perfect and may\n",
+  "need some post-editing.  If no .bib file is specified, all bibtex\n",
+  "databases in the TeX search path will be loaded (currently, recursive\n",
+  "search in subdirectories is NOT performed).\n\n",
+  "Options:\n",
+  "  --latex    format entries as TeX/LaTeX\n",
+  "  --html     format entries as HTML\n",
+  "  --pod      format entries as POD\n",
+  "  --text     format entries as plain text\n",
+  "  --creole   format entries in Creole-style wiki notation\n",
+  "  -D <file>, use bibtex database <file> (can be used repeatedly)\n",
+  "    --database=<file>\n",
+  "  -o <file>, save formatted entries to <file> (default: stdout)\n",
+  "    --output=<file>\n",
+  "  -s <name>, use bibstyle <name> for formatting (default: natbib)\n",
+  "    --style=<name>\n",
+  "  -S,        print each formatted entry on single text line\n",
+  "    --single-line\n",
+  "  --utf8     convert output to UTF-8 encoding\n",
+  "  -l,        list matching bibtex entries (no output)\n",
+  "    --list\n",
+  "  -q,        suppress all non-fatal warnings\n",
+  "    --quiet\n",
+  "  -v,        print some progress information\n",
+  "    --verbose\n",
+  "  -d,        show debugging output\n",  
+  "    --debug\n",
+  "  -h,        this help page\n",
+  "    --help\n\n"
+  unless $ok and @ARGV and not $Help;
+
+@BIB = split /\s*,\s*/, join(",", @BIB); # accepts both -D a.bib -D b.bib and -D a.bib,b.bib
+if (not @BIB) {
+  chomp($tmp = `kpsewhich --show-path=bib`);
+  @path = grep {s/\/+$// or 1} split /:!*/, $tmp;
+  foreach $dir (@path) {
+    push @BIB, glob "$dir/*.bib";
+  }
+  @BIB = sort {-M $a <=> -M $b} @BIB; # read most recent files first (so old copies don't hide newer duplicate entries)
+}
+
+%BIB = ();                                      # load .bib database
+$bibsize = 0;
+$duplicates = 0;
+foreach $Bibfile (@BIB) {
+  $duplicates += read_bib($Bibfile, \%BIB);
+  $bibsize = (keys %BIB) - $bibsize;
+  print STDERR "Read bibtex database $Bibfile ($bibsize entries)\n"
+    if $Verbose;
+}
+if ($duplicates > 0 && !$Quiet) {
+  printf STDERR "Warning: %d duplicate entries ignored %s\n", $duplicates, ($Verbose) ? "" : "(specify -v to display keys, -d for full entries)";
+}
+
+@Keys = ();                                     # match/expand specified keys 
+foreach $entry (@ARGV) {
+  if ($entry =~ /^\/(.*)\/$/) {                 
+    $regexp = qr/$1/i;                          # match regexp against BIB keys (case-insensitive)
+    @cand = grep { /$regexp/ } keys %BIB;
+    die "Error: no match for $entry in database @BIB\n"
+      unless @cand > 0;
+    push @Keys, sort @cand;
+  }
+  else {
+    if (exists $BIB{$entry}) {
+      push @Keys, $entry;                       # exact match
+      next;
+    }
+    $regexp = qr/^\Q$entry\E$/i;
+    @cand = grep { /$regexp/ } keys %BIB; # try case-insensitive match
+    die "Error: key '$entry' has no exact match, but multiple case-insensitive ones.\n"
+      if @cand > 1;
+    if (@cand == 1) {
+      push @Keys, @cand;
+      next;
+    }
+    die "Error: no match for key '$entry' in database @BIB\n";
+  }
+}
+
+%seen = ();                                     # remove duplicate keys
+@Keys = grep { (not exists $seen{$_}) and $seen{$_} = 1 } @Keys;
+$n_keys = @Keys;
+
+print STDERR "$n_keys matching entries found.\n"
+  if $Verbose;
+
+if ($List) {                                    # --list: print matching keys only
+  foreach $key (@Keys) {
+    print "$key\n";
+  }
+  exit 0;
+}
+
+$FH = new FileHandle "> $Output"                # open output file
+  or die "Can't open output file '$Output': $!";
+
+foreach $key (@Keys) {
+  if ($Format eq "bib") {                       # default: print bibtex entries
+    print $FH $BIB{$key}, "\n";
+  }
+  else {                        
+    print STDERR "- $key\n"                     # all other formats start by re-formatting in LaTeX
+      if $Verbose;
+    @latex = format_entry_latex($key, $Format eq "tex"); 
+    if ($Format eq "tex") {                     # LaTeX format
+      @formatted = @latex; 
+    }
+    elsif ($Format eq "ascii") {                # plain text format
+      @formatted = latex2ascii(@latex);
+    }
+    elsif ($Format eq "pod") {                  # POD format
+      @formatted = latex2pod(@latex);
+    }
+    elsif ($Format eq "html") {                 # HTML format
+      @formatted = latex2html(@latex);
+    }
+    elsif ($Format eq "creole") {               # Creole wiki syntax
+      @formatted = latex2creole(@latex);
+    }
+    if ($UTF8) {
+      @formatted = map { $_ = encode("utf8", decode("latin1", $_)) } @formatted;
+    }
+    if ($SingleLine) {       # write formatted entry as single line to output file
+      print $FH join("  ", @formatted), "\n";
+    } else {     
+      foreach (@formatted) { # write formatted entry as block to output file
+        print $FH "$_\n";
+      }
+      print $FH "\n";
+    }
+  }
+}
+
+$FH->close;
+
+print STDERR "Done.\n"
+  if $Verbose;
+exit 0;
+
+
+## run external command with system(), suppressing output without -d option
+sub sys_cmd {
+  my $cmd = shift;
+  my $len = length($cmd) + 14;
+  if ($Debug) {
+    print STDERR " ", "_" x $len, "\n"; 
+    print STDERR "/__ system: $cmd __\n";
+  }
+  else {
+    $cmd .= ' >/dev/null 2>&1';
+  }
+  my $ok = system $cmd;
+  if ($ok != 0) {
+    my $exit_code = $ok >> 8;
+    die "Error: failed to execute command\n\t$cmd\nbecause $!\n"
+      if ($ok & 0xff) != 0;
+    die "Error: the system command\n\t$cmd\nfailed with exit code $exit_code\n";
+  }
+  print STDERR "\\", "_" x $len, "\n"
+    if $Debug;
+}
+
+## slurp a file into an array of chomped lines (appends to existing array)
+sub slurp_file {
+  my $file = shift;
+  my $aref = shift;
+  $aref = []
+    unless defined $aref;
+  my $fh = new FileHandle $file
+    or die "Error: can't open file '$file': $!";
+  while (<$fh>) {
+    chomp;
+    push @$aref, $_;
+  }
+  $fh->close;
+  return $aref;
+}
+
+## write string or array of chomped lines to file
+sub write_file {
+  my $file = shift;
+  my $fh = new FileHandle "> $file"
+    or die "Error: can't create file '$file': $!";
+  foreach my $line (@_) {
+    print $fh "$line\n";
+  }
+  $fh->close;
+}
+
+## format bibtex entry in latex, using bibtex on fake .aux file (returns list of chomped lines)
+sub format_entry_latex {
+  my $key = shift;
+  my $include_bibitem = shift;
+  my $basename = "/tmp/bibformat.$$";
+  my $bibfile = "$basename.bib";
+  my $auxfile = "$basename.aux";
+  write_file($bibfile, $BIB{$key});             # write .bib file with current entry only
+  print STDERR "Wrote temporary file $bibfile\n"
+    if $Debug;
+  write_file($auxfile,                          # write fake .aux file
+             "\\citation{$key}",
+             "\\bibstyle{$Style}",
+             "\\bibdata{$basename}"
+             );
+  print STDERR "Wrote temporary file $auxfile\n"
+    if $Debug;  
+  sys_cmd("bibtex $auxfile");                   # execute bibtex and read resulting .bbl file
+  my @lines = ();
+  slurp_file("$basename.bbl", \@lines);         
+  my @latex = ();
+  foreach (@lines) {         # remove bibliography environment, \bibitem, \newblock, and blank lines
+    s/\\newblock\s*//;
+    next if /^\s*\\(begin|end)\{thebibliography\}/;
+    next if /^\s*\\bibitem/ and not $include_bibitem;
+    next if /^\s*$/;
+    if (s/^\s+//) {
+      $latex[$#latex] .= " $_";                 # append indented continuation lines
+    }
+    else {
+      push @latex, $_;
+    }
+  }
+  sys_cmd("rm -f $basename.*");                 # delete temporary files
+  return @latex;
+}
+
+BEGIN {
+  ## latex diacritics => latin 1 conversion table 
+  our %DIAC = split " ", <<TABLE;
+  `A À  'A Á  ^A Â  ~A Ã  "A Ä  ^A Å  `E È  'E É  ^E Ê  "E Ë  `I Ì  'I Í  ^I Î  "I Ï
+  ~N Ñ  `O Ò  'O Ó  ^O Ô  ~O Õ  "O Ö  `U Ù  'U Ú  ^U Û  "U Ü  'Y Ý
+  `a à  'a á  ^a â  ~a ã  "a ä  ^a å  `e è  'e é  ^e ê  "e ë  `i ì  'i í  ^i î  "i ï
+  ~n ñ  `o ò  'o ó  ^o ô  ~o õ  "o ö  `u ù  'u ú  ^u û  "u ü  'y ý "y ÿ
+TABLE
+}
+
+## convert LaTeX format to plain text, removing any markup (using regular expression substitutions)
+sub latex2ascii {
+  my @lines = @_;
+  map {
+    s/\{?\\(["'`~^])([a-zA-Z])\}?/$DIAC{"$1$2"} or $2/ge; # diacritics
+    s/\{?\\ss\}?/ß/g;                           # \ss -> ß
+    s/\{?\\SS\}?/ß/g;                           # \SS -> SS
+    ## TODO: convert other latex diacritics
+    tr[~][ ];                                   # ~ -> " " 
+    for my $i (1 .. 4) { # process nested blocks
+      s/\\\w+\{([^\}]+)\}/$1/g;                 # remove macros \xxx{...}
+      s/\{(?:\\\w+\s*)?([^\}\\]*)\}/$1/g        # remove block markers {...}, {\em ...}, etc
+    }
+    s/--+/-/g;                                  # reduce long dashes (--, ---) to normal dashes
+  } @lines;
+  return "@lines"; # join into single line
+}
+
+## convert LaTeX format to POD (using regular expression substitutions)
+sub latex2pod {
+  my @lines = @_;
+  map {
+    s/\{?\\(["'`~^])([a-zA-Z])\}?/$DIAC{"$1$2"} or $2/ge; # diacritics
+    s/\{?\\ss\}?/ß/g;                           # \ss -> ß
+    s/\{?\\SS\}?/ß/g;                           # \SS -> SS
+    ## TODO: convert other latex diacritics
+    s/\\url\{([^\}]+)\}/L<$1>/g;                # \url{http:...} -> L<http:...>
+    s/\\textit\{([^\}]+)\}/I<$1>/g;             # \textit{...} -> I<...>
+    s/\{([^\}\\]*)\}/$1/g;                      # remove block markers that do not contain commands
+    s/\{\\em\s*([^\}]*)\}/I<$1>/g;              # italics {\em ...}
+    s/\{\\bf\s*([^\}]*)\}/B<$1>/g;              # bold face {\bf ...}
+    s/\S+~\S+/my $tmp = $&; $tmp =~ tr[~][ ]; "S<$tmp>"/ge;
+    s/([0-9]+)\s*-+\s*([0-9]+)/S<$1 - $2>/g;    # number ranges (usually with long dashes)
+    s/--+/-/g;                                  # reduce long dashes (--, ---) to normal dashes
+  } @lines;
+  return @lines;
+}
+
+## convert LaTeX format to HTML (similar to latex2pod above)
+sub latex2html {
+  my @lines = @_;
+  map {
+    s/\{?\\(["'`~^])([a-zA-Z])\}?/$DIAC{"$1$2"} or $2/ge; # diacritics
+    s/\{?\\ss\}?/ß/g;                           # \ss -> ß
+    s/\{?\\SS\}?/ß/g;                           # \SS -> SS
+    ## TODO: convert other latex diacritics
+    encode_entities($_);                        # encode all non-ASCII characters and metacharacters as entities
+    s/\\url\{([^\}]+)\}/<a href="$1">$1<\/a>/g; # \url{http:...} -> <a href="http:...">http:...</a>
+    s/\\textit\{([^\}]+)\}/<i>$1<\/i>/g;        # \textit{...} -> <i>...</i>
+    s/\{([^\}\\]*)\}/$1/g;                      # remove block markers that do not contain commands
+    s/\{\\em\s*([^\}]*)\}/<i>$1<\/i>/g;         # italics {\em ...} -> <i>...</i>
+    s/\{\\bf\s*([^\}]*)\}/<b>$1<\/b>/g;         # bold face {\bf ...} -> <b> ... </b>
+    s/(\S)~+(\S)/$1\&nbsp;$2/g;         # non-breaking space: ~ -> &nbsp;
+    s/([0-9]+)\s*-+\s*([0-9]+)/$1\&nbsp;&ndash;&nbsp;$2/g;    # number ranges (usually with long dashes)
+    s/---+/\&mdash;/g;                          # long dashes (--, ---) 
+    s/--/\&ndash;/g;
+  } @lines;
+  return("<p>", @lines, "</p>");
+}
+
+## convert LaTeX format to Creole-style wiki syntax (similar to latex2html above)
+sub latex2creole {
+  my @lines = @_;
+  map {
+    s/\{?\\(["'`~^])([a-zA-Z])\}?/$DIAC{"$1$2"} or $2/ge; # diacritics
+    s/\\(["'`~^])\{?([a-zA-Z])\}?/$DIAC{"$1$2"} or ">$1$2<"/ge; # diacritics (other style)
+    s/\{?\\ss\}?/ß/g;                           # \ss -> ß
+    s/\{?\\SS\}?/ß/g;                           # \SS -> SS
+    ## TODO: convert other latex diacritics
+    s/\\url\{([^\}]+)\}/[[$1]]/g; # \url{http:...} -> [["http:..."]]
+    s/\\textit\{([^\}]+)\}/\/\/$1\/\//g;        # \textit{...} -> //...//
+    s/\{([^\}\\]*)\}/$1/g;                      # remove block markers that do not contain commands
+    s/\{\\em\s*([^\}]*)\}/\/\/$1\/\//g;         # italics {\em ...} -> //...//
+    s/\{\\bf\s*([^\}]*)\}/**$1**/g;         # bold face {\bf ...} -> **...**
+    s/(\S)~+(\S)/$1 $2/g;         # non-breaking space: ~ -> " " (no standard wiki syntax available)
+    s/([0-9]+)\s*-+\s*([0-9]+)/$1--$2/g;    # number ranges (usually with long dashes)
+    s/---+/---/g;                          # long dashes (--, ---) 
+    # s/--/--/g;
+  } @lines;
+  return(@lines);
+}
+
+
+## read .bib file, adding entries in specified hash; returns number of duplicate entries (skipped)
+sub read_bib {
+  my $file = shift;
+  my $href = shift;
+  my $n_duplicates = 0;
+  my $cmd = "kpsewhich $file";
+  $cmd .= " 2>/dev/null"
+    unless $Debug;
+  my $path = `$cmd`;
+  if ($path) {
+    chomp $path;
+    die "Error: can't find bibliography file '$file' at path\n\t$path\nreturned by kpsewhich tool\n"
+      unless -f $path;
+    my $fh = new FileHandle $path
+      or die "Error: can't open file '$path'\n";
+    print STDERR "Reading bibtex database: $path\n"
+      if $Debug;
+  LINE:
+    while (1) {
+      $_ = <$fh>;
+      last LINE unless $_;                      # exit loop at end of file
+      next LINE if /^\s*$/ or /^\s*\%/;         # skip comments and empty lines
+      if (/^\s*\@comment/i) {                   # skip @comment entries
+        my $comment = $_;
+        while (1) {
+          $_ = <$fh>;
+          last LINE unless $_;
+          last if /^\s*$/ and $comment =~ /\}\s*$/;
+          $comment .= $_;
+        }
+      }
+      die "Format error: expected start of bibtex entry, but got:\n\t$_(line #$. of $path)\n"
+        unless /^\s*\@[A-Za-z]+\s*\{\s*(\S+)\s*,/;
+      my $key = $1;                             # extract key of entry
+      my $entry = $_;
+    FIELD:
+      while (<$fh>) {
+        last FIELD                      # blank line (or EOF) marks end of entry
+          if /^\s*$/ and $entry =~ /\}\s*$/; # make sure that entry ends with closing brace, so we're not confused by blank lines in entry
+        $entry .= $_;
+      }
+      if (exists $href->{$key} ) {
+        $n_duplicates++;
+        if ($Verbose) {
+          print STDERR "Warning: duplicate bibtex entry for key '$key' (ignored)\n";
+          if ($Debug) {
+            print STDERR "=" x 60, "\n",
+              "First entry for '$key':\n", $href->{$key}, "-" x 60, "\n",
+              "This entry for '$key':\n", $entry, "=" x 60, "\n";
+          }
+        }
+      }
+      $href->{$key} = $entry;
+      print "INSERT BIBENTRY: $key\n"
+        if $Debug;
+    }
+    $fh->close;
+    return $n_duplicates;
+  }
+  else {
+    die "Error: can't find bibliography file '$file'\n";
+  }
+}
+
