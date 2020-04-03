@@ -16,6 +16,7 @@ our $Verbose = 0;             # -v
 our $Widths = "";             # -W <w1>,<w2>,...
 our $Format = "l";            # -F <pattern>
 our $Split = 0;               # -s
+our $XML = 0;                 # -x
 our $Charset = undef;         # -c <encoding>
 our $Paged = 0;               # -p
 our $PostScript = 0;          # -P
@@ -45,6 +46,7 @@ my $ok = GetOptions(
   "W=s" => \$Widths,
   "F=s" => \$Format,
   "s" => \$Split,
+  "x" => \$XML,
   "c=s" => \$Charset,
   "H=s" => \$PageHeader,
   "p" => \$Paged,
@@ -68,20 +70,26 @@ Multiple input files specified on the command line are concatenated into a singl
 Options:
   -h       print this help page
   -v       verbose (show progress info)
+
   -W n1,n2,...  user-defined column widths (<n1> for first column, <n2> for second, etc.)
             - negative values indicate fixed width, other columns will automatically be enlarged
             - if all widths are negative, extra fields in the input will be dropped
+
   -F pat   format columns according to format string <pat> with keys
             - l = left-justified (default)
             - r = right-justified
             - c = centered
            (additional columns take the last specified format, so you can use e.g. "-F r"
            to right-justify all columns, or "-F rl" to right-justify the first column only)
+
+  -x       XML mode: don't format lines that look like XML tags
   -s       split on whitespace (rather than single TABs)
   -c enc   use character encoding <enc> for input and output (e.g. "-c utf8")
   -H s1,s2,...  display column headers <s1>, <s2>, etc. (e.g. "-H lemma,POS,frequency")
+
   -p       paged mode (input is read and formatted in page chunks)
     -L n       print <n> lines per page (paged mode) [default=60]
+
   -P       generate PDF output for printing (implies -p)
     -l          print one wide page instead of two narrow ones ("landscape" mode)
     -1          print single-sided (on duplex printers)
@@ -157,7 +165,7 @@ while (not $end_of_file) {
       printf STDERR "%s>%s reading input [page %d, record #%03d]      \r", " " x $indent, " " x (11 - $indent), $page_num, $records;
     }
     # parse into fields if column widths have to be calculated
-    if ($auto_format) {
+    if ($auto_format && !($XML && /^<.*>$/)) {
       my @fld = ($Split) ? (split) : (split /\t/);
       foreach my $i (0 .. $#fld) {
         my $len = length $fld[$i];
@@ -199,8 +207,13 @@ while (not $end_of_file) {
     print $OUT "\n";
   }
   foreach my $line (@record) {
-    my @fld = ($Split) ? (split " ", $line) : (split /\t/, $line);
-    print_record(@fld); # print line according to formatting choices
+    if ($XML && $line =~ /^<.*>$/) {
+      print $OUT $line, "\n";
+    }
+    else {
+      my @fld = ($Split) ? (split " ", $line) : (split /\t/, $line);
+      print_record(@fld); # print line according to formatting choices
+    }
   }
 
   # print page separator in -p mode
