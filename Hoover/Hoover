@@ -4,8 +4,9 @@ $| = 1;
 
 use Getopt::Long;
 use DirHandle;
+use File::Path qw(remove_tree);
 
-our $VERSION = "1.0.5";
+our $VERSION = "1.0.7";
 
 ## hard-coded cleanup specifications (filenames and patterns):
 sub unconditional_delete {      ## always delete these files:
@@ -18,9 +19,9 @@ sub unconditional_delete {      ## always delete these files:
 sub tex_delete {        ## delete these files if corresponding *.tex exists
   local($_) = shift;
   return (1, $`)
-    if /\.(aux|aux\.bak|bbl|bcf|run.xml|dvi|xdv|out|toc|lot|lof|fls|synctex.gz)$/;
+    if /\.(aux|aux\.bak|auxlock|bbl|bcf|dvi|fls|lof|lot|out|run.xml|synctex.gz|toc|xdv)$/;
   return (2, $`)
-    if /\.(ent|fls|idx|ilg|ind|log|nav|ndx|nin|nlo|ps|snm|spl|tdo|vrb|fdb_latexmk)$/;
+    if /\.(ent|fdb_latexmk|idx|ilg|ind|log|nav|ndx|nin|nlo|ps|snm|spl|tdo|(\d+\.)?vrb)$/;
   return 0;
 } # 0 = don't delete, 1 = delete if *.tex exists or --all, 2 = only delete if *.tex exists 
 
@@ -30,32 +31,39 @@ sub conditional_delete {      ## delete these files if a "base file" exists
   return 0;
 } # 0 = don't delete, $file = delete if $file exists
 
-sub macosx_delete{    ## delete unconditionally with --macosx
+sub macosx_delete {           ## delete unconditionally with --macosx
   local($_) = shift;
   return 1 if /^\.DS_Store$/;
   return 1 if /^\._/;
   return 0;
 }
 
-sub rdata_delete{    ## delete unconditionally with --rdata
+sub rdata_delete {            ## delete unconditionally with --rdata
   local($_) = shift;
   return 1 if /^\.(Rhistory|Rapp.history|RData)$/;
   return 0;
 }
 
-sub python_delete{   ## delete unconditionally with --python
+sub python_delete {           ## delete unconditionally with --python
   local($_) = shift;
   return 1 if /\.pyc$/;
   return 1 if /^__pycache__$/;
+  return 2 if /^.ipynb_checkpoints$/;
+  return 0;
+} # 0 = don't delete, 1 = delete, 2 = delete directory even if nonempty
+
+sub other_delete {            ## delete unconditionally with --other
+  local($_) = shift;
+  return 1 if /^~/;
   return 0;
 }
-
 
 $Opt_Recurse = 0;   # recurse into subdirectories?
 $Opt_All = 0;       # delete TeX temporary files even if there is no associated .tex?
 $Opt_OSX = 0;       # delete files specific to Mac OS X (when sharing data with other operating systems)
 $Opt_R = 0;         # delete R history and workspace files
 $Opt_Py = 0;        # delete Python byte-code files (*.pyc, __pycache__/)
+$Opt_Other = 0;     # delete temporary files from various other apps (~*)
 $Opt_Dry = 0;       # dry run: don't delete any files, just show what would have been done
 $Opt_Verbose = 0;   # verbose: show which files are deleted
 $Opt_Help = 0;
@@ -67,6 +75,7 @@ $ok = GetOptions(
      "macosx|mac|m" => \$Opt_OSX,
      "rdata|R" => \$Opt_R,
      "python|py|y" => \$Opt_Py,
+     "other|o" => \$Opt_Other,
      "dry-run|n" => \$Opt_Dry,
      "verbose|v" => \$Opt_Verbose,
      "help|h" => \$Opt_Help,
@@ -138,13 +147,20 @@ sub hoover_dir {
       delete_file($dir, $file)
         if python_delete($file);
     }
+    if ($Opt_Other) {
+      delete_file($dir, $file)
+        if other_delete($file);
+    }
   }
   if ($Opt_Recurse) {
     foreach my $d (@dirs) {
       hoover_dir("$dir/$d");
       if ($Opt_Py) {
+        my $code = python_delete($d);
+        delete_subtree($dir, $d) # remove entire .ipynb_checkpoints/ tree
+          if $code == 2;
         delete_subdir($dir, $d) # remove __pycache__ directory if it is empty
-          if python_delete($d);
+          if $code == 1;
       }
     }
   }
@@ -180,12 +196,31 @@ sub delete_subdir {
   }
 }
 
+## delete subdirectory with all contents (unless --dry-run was specified)
+sub delete_subtree {
+  my $dir = shift;
+  my $sub = shift;
+  my $dirname = "$dir/$sub";
+  if ($Opt_Verbose) {
+    print "$dirname/**\n";
+  }
+  unless ($Opt_Dry) {
+    my $errors = [];
+    remove_tree($dirname, {safe => 1, error => \$errors});
+    print "Warning: can't delete directory tree $dirname:\n", map {
+        my ($k) = keys %$_;
+        " - $k $_{$k}\n";
+      } @$errors
+      if @$errors;
+  }
+}
+
 
 # usage();
 #   print short usage information and exit
 sub usage {
   print STDERR "\n";
-  print STDERR "Usage:  Hoover [-r] [-a] [-m] [-R] [-y] [-n] [<dir> ...]\n\n";
+  print STDERR "Usage:  Hoover [-r] [-a] [-m] [-R] [-y] [-o] [-n] [-v] [<dir> ...]\n\n";
   print STDERR "Hoover deletes all sorts of temporary files (including\n";
   print STDERR "emacs backup / autosave files and TeX temporary files)\n";
   print STDERR "in the specified directories, or in the current directory\n";
@@ -203,7 +238,9 @@ sub usage {
   print STDERR "      remove R history (.Rhistory, .Rapp.history) and workspace (.RData) files\n";
   print STDERR "      use with very great caution!\n";
   print STDERR "  --python, -py, -y\n";
-  print STDERR "      remove Python byte-code files (.pyc, __pycache__ directories)\n";
+  print STDERR "      remove Python byte-code files (.pyc, __pycache__/ and .ipynb_checkpoints/)\n";
+  print STDERR "  --other, -o\n";
+  print STDERR "      remove various other temp files (MS Office ~* files)\n";
   print STDERR "  --dry-run, -n\n";
   print STDERR "      only show what _would_ have been deleted\n";
   print STDERR "  --verbose, -v\n";
@@ -212,7 +249,7 @@ sub usage {
   print STDERR "      show this help page\n";
   print STDERR "\n";
   print STDERR "Type 'perldoc Hoover' for more information and terms of use.\n";
-  print STDERR "Hoover v$VERSION Copyright (C) 2003-2014 by Stefan Evert\n";
+  print STDERR "Hoover v$VERSION Copyright (C) 2003-2023 by Stephanie Evert\n";
   print STDERR "\n";
   exit 2;
 }
@@ -225,7 +262,7 @@ Hoover - Clean up temporary files from TeX and Emacs
 
 =head1 SYNOPSIS
 
-  Hoover [-r] [-a] [-m] [-R] [-y] [-n] [<dir> ...]
+  Hoover [-r] [-a] [-m] [-R] [-y] [-o] [-n] [-v] [<dir> ...]
 
 =head1 DESCRIPTION
 
@@ -260,6 +297,15 @@ The C<--python> (or C<-py> or C<-y>) option deletes Python byte-code files (C<.p
 unconditionally.  The C<__pycache__> subdirectories created by Python3 are also
 deleted if they are empty, otherwise a warning message will be printed.
 
+The C<--other> (or C<-o>) option unconditionally deletes some other temporary files
+created or left over by various applications.  Use with caution, as these might 
+include legitimate files from other sources, and always do a dry run first.
+
+=over 4
+
+=item * Microsoft Office lock files starting with C<~>
+
+=back
 
 When invoked with the C<--help> (or C<-h>) option, B<Hoover> prints a short
 usage summary.  Note that unlike most other Perl scripts, B<Hoover> allows
@@ -311,9 +357,10 @@ when there is a file F<manual.tex> in the same directory.
 
 =item *
 
-Files with one of the following extensions: C<.aux>, C<.bbl>, C<.dvi>, C<.ent>, 
-C<.fls>, C<.idx>, C<.ilg>, C<.ind>, C<.log>, C<.nav>, C<.ndx>, C<.nin>, C<.nlo>,
-C<.out>, C<.ps>, C<.snm>, C<.spl>, C<.toc>, C<.tdo>, C<.vrb>, C<.fdb_latexmk>
+Files with one of the following extensions: C<.aux>, C<.auxlock>, C<.bbl>, C<.bcf>,
+C<.dvi>, C<.ent>, C<.fdb_latexmk>, C<.fls>, C<.idx>, C<.ilg>, C<.ind>, C<.log>, C<.lof>, 
+C<.lot>, C<.nav>, C<.ndx>, C<.nin>, C<.nlo>, C<.out>, C<.ps>, C<.run.xml>, C<.snm>, 
+C<.spl>, C<.synctex.gz>, C<.toc>, C<.tdo>, C<.vrb>, C<.xdv>.
 
 =item *
 
@@ -334,8 +381,8 @@ programs that are invoked with a mistyped file name.
 
 =item *
 
-Files with the extension C<.aux>, C<.bbl>, C<.dvi>, C<.xdv>, C<.out>, C<.toc>,
-C<.lot>, C<.lof>.
+Files with the extension C<.aux>, C<.auxlock>, C<.bbl>, C<.bcf>, C<.dvi>, C<.fls>, 
+C<.lof>, C<.lot>,C<.out>, C<.run.xml>, C<.synctex.gz>, C<.toc>, C<.xdv>.
 
 =back
 
@@ -363,8 +410,13 @@ the option C<--rdata> (or C<-R>) is specified.
 
 =item *
 
-Filea ending with C<.pyc> and subdirectories named C<__pycache__> will be
-deleted if the option C<--python> (or C<-py> or C<-y>) is specified.
+Files ending with C<.pyc> and subdirectories named C<__pycache__> or C<.ipynb_checkpoints> 
+will be deleted if the option C<--python> (or C<-py> or C<-y>) is specified.
+
+=item *
+
+Files I<starting> with a tilde (i,e, of the form C<~*>) 
+will be deleted if the option C<--other> (or C<-o>) is specified.
 
 =back
 
@@ -380,7 +432,7 @@ INCIDENTAL OR SPECIAL DAMAGES, INCLUDING ANY LOST PROFITS OR LOST
 SAVINGS, EVEN IF HE HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGES, OR FOR ANY CLAIM BY ANY THIRD PARTY.
 
-Copyright (C) 2003-2014 by Stefan Evert (L<http://purl.org/stefan.evert>).
+Copyright (C) 2003-2023 by Stephanie Evert (L<https://www.stephanie-evert.de/>).
 
 =cut
 

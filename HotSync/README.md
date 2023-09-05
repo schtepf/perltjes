@@ -245,8 +245,8 @@ Use the following code snippet to set up command-line completion for HotSync tas
 
 ## Licence
 
-Copyright (C) 2004-2012 by Stefan Evert
-([www.stefan-evert.de](http://www.stefan-evert.de/))
+Copyright (C) 2004-2012 by Stephanie Evert
+([www.stephanie-evert.de](https://www.stephanie-evert.de/))
 
 This software is provided AS IS and the author makes no warranty as to
 its use and performance. You may use the program, redistribute and

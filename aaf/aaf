@@ -15,7 +15,7 @@ our $Quiet = 0;               # -q
 our $Verbose = 0;             # -v
 our $Widths = "";             # -W <w1>,<w2>,...
 our $Format = "l";            # -F <pattern>
-our $Split = 0;               # -s
+our $Split = "\t";            # -s [<pattern>]
 our $XML = 0;                 # -x
 our $Charset = undef;         # -c <encoding>
 our $Paged = 0;               # -p
@@ -45,7 +45,7 @@ my $ok = GetOptions(
   "v" => \$Verbose,
   "W=s" => \$Widths,
   "F=s" => \$Format,
-  "s" => \$Split,
+  "s:s" => \$Split,
   "x" => \$XML,
   "c=s" => \$Charset,
   "H=s" => \$PageHeader,
@@ -83,7 +83,8 @@ Options:
            to right-justify all columns, or "-F rl" to right-justify the first column only)
 
   -x       XML mode: don't format lines that look like XML tags
-  -s       split on whitespace (rather than single TABs)
+  -s pat   split on regular expression <pat> (default: split on TABs)
+    -s     split on whitespace (use equivalent -s "" before non-option argument) 
   -c enc   use character encoding <enc> for input and output (e.g. "-c utf8")
   -H s1,s2,...  display column headers <s1>, <s2>, etc. (e.g. "-H lemma,POS,frequency")
 
@@ -112,6 +113,8 @@ our $auto_format = ($user_fields == 0 or grep {$_ > 0} @field_width);
 our $end_of_file = 0;               # flag will be set by input reader
 our $page_num = 0;                  # keep track of page and line count
 our $line_num = 0;
+
+$Split = " " if $Split eq ""; # -s: split on whitespace
 
 our $decoder = undef;
 if (defined $Charset) {
@@ -166,7 +169,7 @@ while (not $end_of_file) {
     }
     # parse into fields if column widths have to be calculated
     if ($auto_format && !($XML && /^<.*>$/)) {
-      my @fld = ($Split) ? (split) : (split /\t/);
+      my @fld = split $Split;
       foreach my $i (0 .. $#fld) {
         my $len = length $fld[$i];
         while ($i >= $fields) {
@@ -211,7 +214,7 @@ while (not $end_of_file) {
       print $OUT $line, "\n";
     }
     else {
-      my @fld = ($Split) ? (split " ", $line) : (split /\t/, $line);
+      my @fld = split $Split, $line;
       print_record(@fld); # print line according to formatting choices
     }
   }

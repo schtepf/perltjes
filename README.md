@@ -60,7 +60,7 @@ command line. Type `inplace -h` for usage notes.
 
 ## Licence
 
-All software in this repository is Copyright (C) by Stefan Evert ([www.stefan-evert.de](http://www.stefan-evert.de/)).
+All software in this repository is Copyright (C) by Stephanie Evert ([www.stephanie-evert.de](https://www.stephanie-evert.de/)).
 Unless specified otherwise, the following licensing conditions apply:
 
 > This software is provided AS IS and the author makes no warranty as to
