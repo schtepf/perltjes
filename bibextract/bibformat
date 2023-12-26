@@ -1,21 +1,24 @@
-#!/usr/bin/perl -w
+#!/usr/bin/env perl -w
 # -*-cperl-*-
 $| = 1;
 
 # use sigtrap 'handler' => sub { die "Signal caught. Exiting.\n" }, qw<normal-signals>;
 
+use utf8;
+use open qw(:std :encoding(UTF-8));
+
 use FileHandle;
-use Getopt::Long qw/:config no_ignore_case/;
+use Getopt::Long qw(:config no_ignore_case);
 use HTML::Entities;
-use Encode;
 use File::Find;
+use LaTeX::ToUnicode qw(convert $endcw);
+use Regexp::Common;
 
 $Output = "-";       # name of output file (default: print on stdout)
-$Format = "bib";     # default format: standard latex (other --html, --pod, --creole)
+$Format = "bib";     # default format: standard latex (other: --text, --latex, --html, --pod, --md, --creole)
 $Style = "natbib";   # default style: natbib
 @BIB = ();           # bibtex database files (default: all .bib files in search path)
 $SingleLine = 0;     # format each entry as a single text line
-$UTF8 = 0;           # convert output to UTF-8
 $List = 0;           # list matching bibtex keys only (no output)
 $ListBST = 0;        # list all known bibstyles
 $Quiet = 0;          # suppress non-fatal warning
@@ -30,10 +33,10 @@ $ok = GetOptions(
                  "html" => sub {$Format = "html"},
                  "text" => sub {$Format = "ascii"},
                  "pod" => sub {$Format = "pod"},
-                 "latex" => sub {$Format = "tex"},
+                 "markdown|md" => sub {$Format = "markdown"},
+                 "latex|tex" => sub {$Format = "tex"},
                  "creole" => sub {$Format = "creole"},
                  "S|single|single-line" => \$SingleLine,
-                 "utf8" => \$UTF8,
                  "list|l" => \$List,
                  "list-bst" => \$ListBST,
                  "verbose|v" => \$Verbose,
@@ -49,7 +52,7 @@ die "\nUsage:  bibformat [options] <entry> ... \n\n",
   "and formats them using a specified LaTeX bibstyle (default: natbib).\n",
   "Entries are selected by specifying one or more bibtex keys either\n",
   "as literal strings or as regular expressions enclosed in slashes.\n",
-  "Note that formatting (except for latex) is far from perfect and may\n",
+  "Note that formatting (except for latex) will not be perfect and may\n",
   "need some post-editing.  If no .bib file is specified, all bibtex\n",
   "databases in the TeX search path will be loaded (currently, recursive\n",
   "search in subdirectories is NOT performed).\n\n",
@@ -57,9 +60,10 @@ die "\nUsage:  bibformat [options] <entry> ... \n\n",
   "  --latex    format entries as TeX/LaTeX\n",
   "  --html     format entries as HTML\n",
   "  --pod      format entries as POD\n",
+  "  --md       format entries as Markdown\n",
   "  --text     format entries as plain text\n",
   "  --creole   format entries in Creole-style wiki notation\n",
-  "  -D <file>, use bibtex database <file> (can be used repeatedly)\n",
+  "  -D <file>, use bibtex database <file> (can be repeated)\n",
   "    --database=<file>\n",
   "  -o <file>, save formatted entries to <file> (default: stdout)\n",
   "    --output=<file>\n",
@@ -67,7 +71,6 @@ die "\nUsage:  bibformat [options] <entry> ... \n\n",
   "    --style=<name>\n",
   "  -S,        print each formatted entry on single text line\n",
   "    --single-line\n",
-  "  --utf8     convert output to UTF-8 encoding\n",
   "  -l,        list matching bibtex entries (no output)\n",
   "    --list\n",
   "  --list-bst list all available bibstyles, then exit\n",
@@ -184,8 +187,11 @@ foreach $key (@Keys) {
     elsif ($Format eq "creole") {               # Creole wiki syntax
       @formatted = latex2creole(@latex);
     }
-    if ($UTF8) {
-      @formatted = map { $_ = encode("utf8", decode("latin1", $_)) } @formatted;
+    elsif ($Format eq "markdown") {
+      @formatted = latex2markdown(@latex);
+    }
+    else {
+      die "Internal error: unsupported format '$Format'\n";
     }
     if ($SingleLine) {       # write formatted entry as single line to output file
       print $FH join("  ", @formatted), "\n";
@@ -291,95 +297,100 @@ sub format_entry_latex {
   return @latex;
 }
 
-BEGIN {
-  ## latex diacritics => latin 1 conversion table 
-  our %DIAC = split " ", <<TABLE;
-  `A À  'A Á  ^A Â  ~A Ã  "A Ä  ^A Å  `E È  'E É  ^E Ê  "E Ë  `I Ì  'I Í  ^I Î  "I Ï
-  ~N Ñ  `O Ò  'O Ó  ^O Ô  ~O Õ  "O Ö  `U Ù  'U Ú  ^U Û  "U Ü  'Y Ý
-  `a à  'a á  ^a â  ~a ã  "a ä  ^a å  `e è  'e é  ^e ê  "e ë  `i ì  'i í  ^i î  "i ï
-  ~n ñ  `o ò  'o ó  ^o ô  ~o õ  "o ö  `u ù  'u ú  ^u û  "u ü  'y ý "y ÿ
-TABLE
+## extra conversions not handled by LaTeX::ToUnicode yet (operates in-place)
+sub extra_conversions {
+  foreach (@_) {
+    s/\\guillem[oe]tleft(\{\})?/Â«/g;
+    s/\\guillem[oe]tright(\{\})?/Â»/g;
+    s/\\guilsinglleft(\{\})?/â€¹/g;
+    s/\\guilsinglright(\{\})?/â€º/g;
+    s/\\quotedblbase(\{\})?/â€ž/g;
+    s/\\quotesinglbase(\{\})?/â€š/g;
+  }
 }
 
-## convert LaTeX format to plain text, removing any markup (using regular expression substitutions)
+## convert latex markup to simple markup tags that survive latex decode (in-place)
+sub convert_markup {
+  my $argument = qr/([^{}]|$RE{balanced}{-parens => '{}'})*/;
+  foreach (@_) {
+    s/\{\\em\s+($argument)\}/[i($1)i]/g;
+    s/\{\\bf\s+($argument)\}/[b($1)b]/g;
+    s/\\textit\{($argument)\}/[i($1)i]/g;
+    s/\\textbf\{($argument)\}/[b($1)b]/g;
+    s/\\url\{($argument)\}/[url($1)url]/g;    
+  }
+}
+
+## convert LaTeX format to plain text, removing any markup
 sub latex2ascii {
   my @lines = @_;
-  map {
-    s/\{?\\(["'`~^])([a-zA-Z])\}?/$DIAC{"$1$2"} or $2/ge; # diacritics
-    s/\{?\\ss\}?/ß/g;                           # \ss -> ß
-    s/\{?\\SS\}?/ß/g;                           # \SS -> SS
-    ## TODO: convert other latex diacritics
-    tr[~][ ];                                   # ~ -> " " 
-    for my $i (1 .. 4) { # process nested blocks
-      s/\\\w+\{([^\}]+)\}/$1/g;                 # remove macros \xxx{...}
-      s/\{(?:\\\w+\s*)?([^\}\\]*)\}/$1/g        # remove block markers {...}, {\em ...}, etc
-    }
-    s/--+/-/g;                                  # reduce long dashes (--, ---) to normal dashes
-  } @lines;
+  foreach (@lines) {
+    extra_conversions($_);
+    $_ = convert($_);
+  }
   return "@lines"; # join into single line
 }
 
-## convert LaTeX format to POD (using regular expression substitutions)
+## convert LaTeX format to POD
 sub latex2pod {
   my @lines = @_;
-  map {
-    s/\{?\\(["'`~^])([a-zA-Z])\}?/$DIAC{"$1$2"} or $2/ge; # diacritics
-    s/\{?\\ss\}?/ß/g;                           # \ss -> ß
-    s/\{?\\SS\}?/ß/g;                           # \SS -> SS
-    ## TODO: convert other latex diacritics
-    s/\\url\{([^\}]+)\}/L<$1>/g;                # \url{http:...} -> L<http:...>
-    s/\\textit\{([^\}]+)\}/I<$1>/g;             # \textit{...} -> I<...>
-    s/\{([^\}\\]*)\}/$1/g;                      # remove block markers that do not contain commands
-    s/\{\\em\s*([^\}]*)\}/I<$1>/g;              # italics {\em ...}
-    s/\{\\bf\s*([^\}]*)\}/B<$1>/g;              # bold face {\bf ...}
-    s/\S+~\S+/my $tmp = $&; $tmp =~ tr[~][ ]; "S<$tmp>"/ge;
-    s/([0-9]+)\s*-+\s*([0-9]+)/S<$1 - $2>/g;    # number ranges (usually with long dashes)
-    s/--+/-/g;                                  # reduce long dashes (--, ---) to normal dashes
-  } @lines;
+  foreach (@lines) {
+    extra_conversions($_);
+    convert_markup($_);
+    $_ = convert($_);
+    s/\[i\((.*?)\)i\]/I<$1>/g;
+    s/\[b\((.*?)\)b\]/B<$1>/g;
+    s/\[url\((.*?)\)url\]/L<$1>/g;
+  }
   return @lines;
 }
 
-## convert LaTeX format to HTML (similar to latex2pod above)
+## convert LaTeX format to HTML
 sub latex2html {
   my @lines = @_;
-  map {
-    s/\{?\\(["'`~^])([a-zA-Z])\}?/$DIAC{"$1$2"} or $2/ge; # diacritics
-    s/\{?\\ss\}?/ß/g;                           # \ss -> ß
-    s/\{?\\SS\}?/ß/g;                           # \SS -> SS
-    ## TODO: convert other latex diacritics
-    encode_entities($_);                        # encode all non-ASCII characters and metacharacters as entities
-    s/\\url\{([^\}]+)\}/<a href="$1">$1<\/a>/g; # \url{http:...} -> <a href="http:...">http:...</a>
-    s/\\textit\{([^\}]+)\}/<i>$1<\/i>/g;        # \textit{...} -> <i>...</i>
-    s/\{([^\}\\]*)\}/$1/g;                      # remove block markers that do not contain commands
-    s/\{\\em\s*([^\}]*)\}/<i>$1<\/i>/g;         # italics {\em ...} -> <i>...</i>
-    s/\{\\bf\s*([^\}]*)\}/<b>$1<\/b>/g;         # bold face {\bf ...} -> <b> ... </b>
-    s/(\S)~+(\S)/$1\&nbsp;$2/g;         # non-breaking space: ~ -> &nbsp;
-    s/([0-9]+)\s*-+\s*([0-9]+)/$1\&nbsp;&ndash;&nbsp;$2/g;    # number ranges (usually with long dashes)
-    s/---+/\&mdash;/g;                          # long dashes (--, ---) 
-    s/--/\&ndash;/g;
-  } @lines;
+  foreach (@lines) {
+    extra_conversions($_);
+    convert_markup($_);
+    s/(?<=\S)~+(?=\S)/[(nbsp)]/g;
+    $_ = convert($_);
+    encode_entities($_, '<>&""');
+    s/\[\(nbsp\)\]/&nbsp;/g;  # convert simple markup to HTML
+    s/\[i\((.*?)\)i\]/<i>$1<\/i>/g;
+    s/\[b\((.*?)\)b\]/<b>$1<\/b>/g;
+    s/\[url\((.*?)\)url\]/<a href="$1">$1<\/a>/g;
+  }
   return("<p>", @lines, "</p>");
 }
 
-## convert LaTeX format to Creole-style wiki syntax (similar to latex2html above)
+## convert LaTeX format to Markdown
+sub latex2markdown {
+  my @lines = @_;
+  foreach (@lines) {
+    extra_conversions($_);
+    convert_markup($_);
+    $_ = convert($_);
+    s/\[i\((.*?)\)i\]/_$1_/g;
+    s/\[b\((.*?)\)b\]/**$1**/g;
+    s/\[url\((.*?)\)url\]/[$1]($1)/g;
+    s/â€“/--/g;
+    s/â€”/---/g;
+  }
+  return(@lines);
+}
+
+## convert LaTeX format to Creole-style wiki syntax
 sub latex2creole {
   my @lines = @_;
-  map {
-    s/\{?\\(["'`~^])([a-zA-Z])\}?/$DIAC{"$1$2"} or $2/ge; # diacritics
-    s/\\(["'`~^])\{?([a-zA-Z])\}?/$DIAC{"$1$2"} or ">$1$2<"/ge; # diacritics (other style)
-    s/\{?\\ss\}?/ß/g;                           # \ss -> ß
-    s/\{?\\SS\}?/ß/g;                           # \SS -> SS
-    ## TODO: convert other latex diacritics
-    s/\\url\{([^\}]+)\}/[[$1]]/g; # \url{http:...} -> [["http:..."]]
-    s/\\textit\{([^\}]+)\}/\/\/$1\/\//g;        # \textit{...} -> //...//
-    s/\{([^\}\\]*)\}/$1/g;                      # remove block markers that do not contain commands
-    s/\{\\em\s*([^\}]*)\}/\/\/$1\/\//g;         # italics {\em ...} -> //...//
-    s/\{\\bf\s*([^\}]*)\}/**$1**/g;         # bold face {\bf ...} -> **...**
-    s/(\S)~+(\S)/$1 $2/g;         # non-breaking space: ~ -> " " (no standard wiki syntax available)
-    s/([0-9]+)\s*-+\s*([0-9]+)/$1--$2/g;    # number ranges (usually with long dashes)
-    s/---+/---/g;                          # long dashes (--, ---) 
-    # s/--/--/g;
-  } @lines;
+  foreach (@lines) {
+    extra_conversions($_);
+    convert_markup($_);
+    $_ = convert($_);
+    s/\[i\((.*?)\)i\]/\/\/<$1>\/\//g;
+    s/\[b\((.*?)\)b\]/**$1**/g;
+    s/\[url\((.*?)\)url\]/[[$1]]/g;
+    s/â€“/--/g;
+    s/â€”/---/g;
+  }
   return(@lines);
 }
 
