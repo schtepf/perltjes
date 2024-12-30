@@ -1,0 +1,68 @@
+#!/usr/bin/env perl
+# -*-cperl-*-
+
+use strict;
+use warnings;
+
+use Getopt::Long qw(:config no_ignore_case bundling);
+use CWB; # sheer laziness for running shell commands
+## required commmand-line tools (in standard path): sha256sum, ssh, scp
+
+our $Help = 0;                  # -h
+our $Remove = 0;                # -R, --rm
+our $Host = "klue_obelix";      # -H <name>
+our $Dir = "/data/corpora/htdocs/data/tmp"; # -d <dir>
+our $URL = "https://corpora.linguistik.uni-erlangen.de/data/tmp"; # -U <url>
+
+my $ok = GetOptions(
+  "h" => \$Help,
+  "R|rm" => \$Remove,
+  "H|host=s" => \$Host,
+  "d|dir=s" => \$Dir,
+  "U|url=s" => \$URL,
+);
+$ok = 0 unless @ARGV == 1;
+
+die <<'USAGE' unless $ok and not $Help;
+Usage:  obelixmove [options] <file>
+
+Share large file via upload to remote web server with "secret" URL.
+
+Options:
+  -h, --help                    print this help page
+  -R, --rm                      remove specified file from remote host
+  -H <name>, --host=<name>      remote host to use (SSH specification)
+  -d <dir>, --dir=<dir>         file sharing directory on remote host
+  -U <url>, --url=<url>         base URL for download link
+USAGE
+
+our $File = shift @ARGV;
+die "Error: can't access file $File\n" unless -f $File;
+
+our @output = ();
+CWB::Shell::Cmd(["sha256sum", $File], \@output);
+die "Error: failed to compute SHA256 checksum\n" unless @output == 1;
+our ($Hash) = split /\s+/, $output[0];
+
+our $Ext = ($File =~ /(\.[\w-]+)+$/) ? $& : "";
+
+our $RName = $Hash.$Ext;
+our $RFile = "$Dir/$RName";
+our $RURL = "$URL/$RName";
+
+if ($Remove) {
+  my $cmd = ["ssh", $Host, "rm", $RFile];
+  # print "EXEC @$cmd\n";
+  CWB::Shell::Cmd($cmd);
+  print "File $RName has been removed from $Host.\n";
+}
+else {
+  my $cmd = ["scp", $File, "$Host:$RFile"];
+  # print "EXEC @$cmd\n";
+  CWB::Shell::Cmd($cmd);
+  print "Download URL: $RURL\n";
+}
+
+
+
+
