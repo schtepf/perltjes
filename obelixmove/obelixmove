@@ -5,39 +5,71 @@ use strict;
 use warnings;
 
 use Getopt::Long qw(:config no_ignore_case bundling);
+use File::Basename;
 use CWB; # sheer laziness for running shell commands
-## required commmand-line tools (in standard path): sha256sum, ssh, scp
+## required commmand-line tools (in standard path): sha256sum, ssh, scp, zip
 
 our $Help = 0;                  # -h
 our $Remove = 0;                # -R, --rm
+our $Zip = 0;                   # -z, --zip
 our $Host = "klue_obelix";      # -H <name>
 our $Dir = "/data/corpora/htdocs/data/tmp"; # -d <dir>
 our $URL = "https://corpora.linguistik.uni-erlangen.de/data/tmp"; # -U <url>
+our $Debug = 0;                 # -D, --debug
 
 my $ok = GetOptions(
   "h" => \$Help,
   "R|rm" => \$Remove,
+  "z|zip" => \$Zip,
   "H|host=s" => \$Host,
   "d|dir=s" => \$Dir,
   "U|url=s" => \$URL,
+  "D|debug" => \$Debug,
 );
-$ok = 0 unless @ARGV == 1;
+$ok = 0 unless @ARGV >= 1;
 
 die <<'USAGE' unless $ok and not $Help;
-Usage:  obelixmove [options] <file>
+Usage:  obelixmove [options] <file> [<file> ...]
 
-Share large file via upload to remote web server with "secret" URL.
+Share large file via upload to remote web server with "secret" URL. Use --zip to
+transfer multiple files or preserve original filename (by wrapping in ZIP archive).
+Note that --zip only stores filenames, not the full paths.
 
 Options:
   -h, --help                    print this help page
   -R, --rm                      remove specified file from remote host
+  -z, --zip                     wrap file(s) in ZIP archive (req'd for multiple files)
   -H <name>, --host=<name>      remote host to use (SSH specification)
   -d <dir>, --dir=<dir>         file sharing directory on remote host
   -U <url>, --url=<url>         base URL for download link
+  -D, --debug                   show debugging output
 USAGE
 
-our $File = shift @ARGV;
-die "Error: can't access file $File\n" unless -f $File;
+our $File;
+if ($Zip) {
+  my @items = map {
+    die "Error: can't access file $_\n" unless -f;
+    [basename($_), $_]
+  } @ARGV;
+  my %dup = ();
+  foreach (@items) {
+    $dup{$_->[0]}++;
+  }
+  my @duplicates = grep {$dup{$_} > 1} keys %dup;
+  die "Error: duplicate filenames in ZIP archive (@duplicates) not allowed\n" if @duplicates;
+  my @files = map {$_->[1]} sort {$a->[0] cmp $b->[0]} @items;
+  printf "Wrapping %d files in ZIP archive ...\n", scalar @files;
+
+  $File = "/tmp/obelixmove_$$.zip";
+  my $cmd = ["zip", "-j", $File, @files];
+  print "EXEC @$cmd\n" if $Debug;
+  CWB::Shell::Cmd($cmd);
+}
+else {
+  die "Error: multiple files can only be transferred with --zip\n" unless @ARGV == 1;
+  $File = shift @ARGV;
+  die "Error: can't access file $File\n" unless -f $File;
+}
 
 our @output = ();
 CWB::Shell::Cmd(["sha256sum", $File], \@output);
@@ -52,17 +84,23 @@ our $RURL = "$URL/$RName";
 
 if ($Remove) {
   my $cmd = ["ssh", $Host, "rm", $RFile];
-  # print "EXEC @$cmd\n";
+  print "EXEC @$cmd\n" if $Debug;
   CWB::Shell::Cmd($cmd);
   print "File $RName has been removed from $Host.\n";
 }
 else {
   my $cmd = ["scp", $File, "$Host:$RFile"];
-  # print "EXEC @$cmd\n";
+  print "EXEC @$cmd\n" if $Debug;
   CWB::Shell::Cmd($cmd);
   print "Download URL: $RURL\n";
 }
 
+END {
+  if ($Zip && -f $File) {
+    print "AUTOREMOVE $File\n" if $Debug;
+    CWB::Shell::Cmd(["rm", $File]);
+  }
+}
 
 
 
