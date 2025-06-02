@@ -61,9 +61,9 @@ if (-f $db_file) {
   my $FH = CWB::OpenFile $db_file;
   while (<$FH>) {
     chomp;
-    my ($hash, $rname, $host, $dir, $url, @files) = split /\t/;
+    my ($hash, $rname, $host, $dir, $url, $size, @files) = split /\t/;
     die "Error: database has duplicate entry for $hash (aborted).\n" if exists $DB{$hash};
-    $DB{$hash} = [$rname, $host, $dir, $url, @files]
+    $DB{$hash} = [$rname, $host, $dir, $url, $size, @files]
   }
   $FH->close;
 }
@@ -73,13 +73,14 @@ if ($List) {
   die "Error: --list only takes a single hash or regular expression.\n" if @ARGV > 1;
   my $filter = (@ARGV) ? qr/^($ARGV[0])/ : undef;
   foreach my $h (sort keys %DB) {
-    my ($rname, $host, $dir, $url, @files) = @{$DB{$h}};
+    my ($rname, $host, $dir, $url, $size, @files) = @{$DB{$h}};
     if ($filter) {
       next unless $h =~ $filter;
       print "$rname:\n";
       print "\thost:\t$host\n";
       print "\tdir:\t$dir\n";
-      print "\turl: \t$url\n";
+      print "\turl:\t$url\n";
+      printf "\tsize:\t%d (%.1f MB)\n", $size, $size / 1e6;
       printf "\tfiles:\t%s\n", shift @files;
       foreach (@files) {
         print "\t\t$_\n";
@@ -88,7 +89,7 @@ if ($List) {
     }
     else {
       my $fileinfo = (@files > 1) ? sprintf "(%d files)", scalar @files : $files[0];
-      printf "%-70s  %s\n", $rname, $fileinfo;
+      printf "%-70s  %6.1f MB  %s\n", $rname, $size / 1e6, $fileinfo;
     }
   }
   exit 0;
@@ -130,7 +131,7 @@ if ($Remove && @Files == 1 && ! -f $File) {
   my @matches = grep {/^($File)/} keys %DB;
   die "Error: -R <prefix> must select unique transfer (but matches: @matches).\n" unless @matches == 1;
   $Hash = shift @matches;
-  ($RName, $Host, $Dir, $URL, @Files) = @{$DB{$Hash}};
+  ($RName, $Host, $Dir, $URL, $_, @Files) = @{$DB{$Hash}};
   $RFile = "$Dir/$RName";
 }
 else {
@@ -162,7 +163,7 @@ else {
   print "EXEC @$cmd\n" if $Debug;
   CWB::Shell::Cmd($cmd);
   print "Download URL: $RURL\n";
-  $DB{$Hash} = [$RName, $Host, $Dir, $RURL, @Files];
+  $DB{$Hash} = [$RName, $Host, $Dir, $RURL, -s $File, @Files];
 }
 
 ## save database of transferred files (which should have been modified)
