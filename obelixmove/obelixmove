@@ -6,10 +6,12 @@ use warnings;
 
 use Getopt::Long qw(:config no_ignore_case bundling);
 use File::Basename;
+use File::HomeDir qw(my_data);
 use CWB; # sheer laziness for running shell commands
 ## required commmand-line tools (in standard path): sha256sum, ssh, scp, zip
 
 our $Help = 0;                  # -h
+our $List = 0;                  # -l, --list
 our $Remove = 0;                # -R, --rm
 our $Zip = 0;                   # -z, --zip
 our $Host = "klue_obelix";      # -H <name>
@@ -19,6 +21,7 @@ our $Debug = 0;                 # -D, --debug
 
 my $ok = GetOptions(
   "h" => \$Help,
+  "l|list" => \$List,
   "R|rm" => \$Remove,
   "z|zip" => \$Zip,
   "H|host=s" => \$Host,
@@ -26,10 +29,13 @@ my $ok = GetOptions(
   "U|url=s" => \$URL,
   "D|debug" => \$Debug,
 );
-$ok = 0 unless @ARGV >= 1;
+$ok = 0 unless @ARGV >= 1 || $List;
 
 die <<'USAGE' unless $ok and not $Help;
 Usage:  obelixmove [options] <file> [<file> ...]
+        obelixmove -l [<prefix>]
+        obelixmove -R [options] <file> [<file> ...]
+        obelixmove -R <prefix>
 
 Share large file via upload to remote web server with "secret" URL. Use --zip to
 transfer multiple files or preserve original filename (by wrapping in ZIP archive).
@@ -37,7 +43,9 @@ Note that --zip only stores filenames, not the full paths.
 
 Options:
   -h, --help                    print this help page
-  -R, --rm                      remove specified file from remote host
+  -l, --list                    list database of transferred files or entries matching <prefix>
+  -R, --rm                      remove specified transfer from remote host
+                                (specify either all files or unique <prefix>, overrinding -H and -d)
   -z, --zip                     wrap file(s) in ZIP archive (req'd for multiple files)
   -H <name>, --host=<name>      remote host to use (SSH specification)
   -d <dir>, --dir=<dir>         file sharing directory on remote host
@@ -45,7 +53,50 @@ Options:
   -D, --debug                   show debugging output
 USAGE
 
+## load database of obelixmove transfers
+our %DB = ();
+our $db_file = my_data()."/.obelixmovedb";
+if (-f $db_file) {
+  print "[loading database of transferred files from $db_file]\n" if $Debug;
+  my $FH = CWB::OpenFile $db_file;
+  while (<$FH>) {
+    chomp;
+    my ($hash, $rname, $host, $dir, $url, @files) = split /\t/;
+    die "Error: database has duplicate entry for $hash (aborted).\n" if exists $DB{$hash};
+    $DB{$hash} = [$rname, $host, $dir, $url, @files]
+  }
+  $FH->close;
+}
+
+## -l / --list: list all transfers or those matching prefix (with details)
+if ($List) {
+  die "Error: --list only takes a single hash or regular expression.\n" if @ARGV > 1;
+  my $filter = (@ARGV) ? qr/^($ARGV[0])/ : undef;
+  foreach my $h (sort keys %DB) {
+    my ($rname, $host, $dir, $url, @files) = @{$DB{$h}};
+    if ($filter) {
+      next unless $h =~ $filter;
+      print "$rname:\n";
+      print "\thost:\t$host\n";
+      print "\tdir:\t$dir\n";
+      print "\turl: \t$url\n";
+      printf "\tfiles:\t%s\n", shift @files;
+      foreach (@files) {
+        print "\t\t$_\n";
+      }
+      print "\n";
+    }
+    else {
+      my $fileinfo = (@files > 1) ? sprintf "(%d files)", scalar @files : $files[0];
+      printf "%-70s  %s\n", $rname, $fileinfo;
+    }
+  }
+  exit 0;
+}
+
+## bundle multiple files in ZIP archive
 our $File;
+our @Files;
 if ($Zip) {
   my @items = map {
     die "Error: can't access file $_\n" unless -f;
@@ -64,37 +115,65 @@ if ($Zip) {
   my $cmd = ["zip", "-j", $File, @files];
   print "EXEC @$cmd\n" if $Debug;
   CWB::Shell::Cmd($cmd);
+  @Files = @files;
 }
 else {
   die "Error: multiple files can only be transferred with --zip\n" unless @ARGV == 1;
   $File = shift @ARGV;
-  die "Error: can't access file $File\n" unless -f $File;
+  @Files = $File;
 }
 
-our @output = ();
-CWB::Shell::Cmd(["sha256sum", $File], \@output);
-die "Error: failed to compute SHA256 checksum\n" unless @output == 1;
-our ($Hash) = split /\s+/, $output[0];
+## compute hash, then construct remote filename and download URL
+our ($Hash, $Ext, $RName, $RFile, $RURL);
+if ($Remove && @Files == 1 && ! -f $File) {
+  ## special case: -R <prefix> to remove entry from database of transfers
+  my @matches = grep {/^($File)/} keys %DB;
+  die "Error: -R <prefix> must select unique transfer (but matches: @matches).\n" unless @matches == 1;
+  $Hash = shift @matches;
+  ($RName, $Host, $Dir, $URL, @Files) = @{$DB{$Hash}};
+  $RFile = "$Dir/$RName";
+}
+else {
+  die "Error: can't access file $File\n" unless -f $File;
+  our @output = ();
+  CWB::Shell::Cmd(["sha256sum", $File], \@output);
+  die "Error: failed to compute SHA256 checksum\n" unless @output == 1;
+  ($Hash) = split /\s+/, $output[0];
 
-our $Ext = ($File =~ /(\.[\w-]+)+$/) ? $& : "";
+  $Ext = ($File =~ /(\.[\w-]+)+$/) ? $& : "";
+  $RName = $Hash.$Ext;
+  $RFile = "$Dir/$RName";
+  $RURL = "$URL/$RName";
+}
 
-our $RName = $Hash.$Ext;
-our $RFile = "$Dir/$RName";
-our $RURL = "$URL/$RName";
-
+## -R / --rm: remove specified transfer from host
 if ($Remove) {
+  warn "Warning: $RName is not a known transfer (ignored).\n" unless exists $DB{$Hash};
   my $cmd = ["ssh", $Host, "rm", $RFile];
   print "EXEC @$cmd\n" if $Debug;
   CWB::Shell::Cmd($cmd);
   print "File $RName has been removed from $Host.\n";
+  delete $DB{$Hash};
 }
+## default operation: transfer file or ZIP archive to host
 else {
+  die "Error: $Hash has already been sent (aborted).\n" if exists $DB{$Hash};
   my $cmd = ["scp", $File, "$Host:$RFile"];
   print "EXEC @$cmd\n" if $Debug;
   CWB::Shell::Cmd($cmd);
   print "Download URL: $RURL\n";
+  $DB{$Hash} = [$RName, $Host, $Dir, $RURL, @Files];
 }
 
+## save database of transferred files (which should have been modified)
+print "[saving database of transferred files to $db_file]\n" if $Debug;
+my $FH = CWB::OpenFile ">", $db_file;
+foreach my $h (sort keys %DB) {
+  print $FH join("\t", $h, @{$DB{$h}}), "\n";
+}
+$FH->close;
+
+## make sure that temporary ZIP archive is cleaned up
 END {
   if ($Zip && -f $File) {
     print "AUTOREMOVE $File\n" if $Debug;
