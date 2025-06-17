@@ -100,8 +100,8 @@ our $File;
 our @Files;
 if ($Zip) {
   my @items = map {
-    my $ok = -f || ($Zip && -d); # can also wrap directories with --zip
-    die "Error: can't access file $_\n" unless $ok;
+    die "Error: can't transfer subdirectory $_/ (only plain files allowed)\n" if -d;
+    die "Error: can't access file $_\n" unless -f;
     [basename($_), $_]
   } @ARGV;
   my %dup = ();
@@ -114,7 +114,7 @@ if ($Zip) {
   printf "Wrapping %d files in ZIP archive ...\n", scalar @files;
 
   $File = "/tmp/obelixmove_$$.zip";
-  my $cmd = ["zip", "-j", "-r", $File, @files];
+  my $cmd = ["zip", "-j", $File, @files];
   print "EXEC @$cmd\n" if $Debug;
   CWB::Shell::Cmd($cmd);
   @Files = @files;
@@ -136,6 +136,7 @@ if ($Remove && @Files == 1 && ! -f $File) {
   $RFile = "$Dir/$RName";
 }
 else {
+  die "Error: can't transfer subdirectory $File/ (only plain files allowed)\n" if -d $File; 
   die "Error: can't access file $File\n" unless -f $File;
   our @output = ();
   CWB::Shell::Cmd(["sha256sum", $File], \@output);
@@ -177,7 +178,7 @@ $FH->close;
 
 ## make sure that temporary ZIP archive is cleaned up
 END {
-  if ($Zip && -f $File) {
+  if ($Zip && $File && -f $File) {
     print "AUTOREMOVE $File\n" if $Debug;
     CWB::Shell::Cmd(["rm", $File]);
   }
