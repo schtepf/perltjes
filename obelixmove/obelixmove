@@ -37,7 +37,7 @@ Usage:  obelixmove [options] <file> [<file> ...]
         obelixmove -R [options] <file> [<file> ...]
         obelixmove -R <prefix>
 
-Share large file via upload to remote web server with "secret" URL. Use --zip to
+Share large files via upload to remote web server with "secret" URL. Use --zip to
 transfer multiple files or preserve original filename (by wrapping in ZIP archive).
 Note that --zip only stores filenames, not the full paths.
 
@@ -100,7 +100,8 @@ our $File;
 our @Files;
 if ($Zip) {
   my @items = map {
-    die "Error: can't access file $_\n" unless -f;
+    my $ok = -f || ($Zip && -d); # can also wrap directories with --zip
+    die "Error: can't access file $_\n" unless $ok;
     [basename($_), $_]
   } @ARGV;
   my %dup = ();
@@ -113,7 +114,7 @@ if ($Zip) {
   printf "Wrapping %d files in ZIP archive ...\n", scalar @files;
 
   $File = "/tmp/obelixmove_$$.zip";
-  my $cmd = ["zip", "-j", $File, @files];
+  my $cmd = ["zip", "-j", "-r", $File, @files];
   print "EXEC @$cmd\n" if $Debug;
   CWB::Shell::Cmd($cmd);
   @Files = @files;
