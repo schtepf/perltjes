@@ -19,7 +19,7 @@ sub unconditional_delete {      ## always delete these files:
 sub tex_delete {        ## delete these files if corresponding *.tex exists
   local($_) = shift;
   return (1, $`)
-    if /\.(aux|aux\.bak|auxlock|bbl|bcf|dvi|fls|lof|lot|out|run.xml|synctex.gz|toc|xdv)$/;
+    if /\.(aux|aux\.bak|auxlock|bbl|bcf|dvi|fls|lof|lot|out(\.ps)?|run.xml|synctex.gz|toc|xdv)$/;
   return (2, $`)
     if /\.(ent|fdb_latexmk|idx|ilg|ind|log|nav|ndx|nin|nlo|ps|snm|spl|tdo|(\d+\.)?vrb)$/;
   return 0;
@@ -382,7 +382,7 @@ programs that are invoked with a mistyped file name.
 =item *
 
 Files with the extension C<.aux>, C<.auxlock>, C<.bbl>, C<.bcf>, C<.dvi>, C<.fls>, 
-C<.lof>, C<.lot>,C<.out>, C<.run.xml>, C<.synctex.gz>, C<.toc>, C<.xdv>.
+C<.lof>, C<.lot>,C<.out>, C<.out.ps>, C<.run.xml>, C<.synctex.gz>, C<.toc>, C<.xdv>.
 
 =back
 
