@@ -281,15 +281,20 @@ sub format_entry_latex {
   my @lines = ();
   slurp_file("$basename.bbl", \@lines);         
   my @latex = ();
+  my $skipped_bibitem = 0;
   foreach (@lines) {         # remove bibliography environment, \bibitem, \newblock, and blank lines
     s/\\newblock\s*//;
     next if /^\s*\\(begin|end)\{thebibliography\}/;
-    next if /^\s*\\bibitem/ and not $include_bibitem;
+    if (/^\s*\\bibitem/ and not $include_bibitem) {
+      $skipped_bibitem = 1; # also skip any continuation lines
+      next; 
+    }
     next if /^\s*$/;
     if (s/^\s+//) {
-      $latex[$#latex] .= " $_";                 # append indented continuation lines
+      $latex[$#latex] .= " $_" unless $skipped_bibitem # append indented continuation lines
     }
     else {
+      $skipped_bibitem = 0; # normal line, so further continuation lines belong here
       push @latex, $_;
     }
   }
