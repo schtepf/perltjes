@@ -1,24 +1,26 @@
-#!/usr/bin/perl -w
+#!/usr/bin/env perl
 # -*-cperl-*-
 $| = 1;
 
 # use sigtrap 'handler' => sub { die "Signal caught. Exiting.\n" }, qw<normal-signals>;
+use warnings;
+use strict;
 
 use FileHandle;
 use Getopt::Long;
 
-$MakeBitmap = 0;         # whether to generate bitmap from .eps as well
-$Scale      = 2;         # scaling factor for bitmap (default: 2)
-$MakePDF    = 0;         # whether to generate .pdf from .eps as well
-$Clean      = 0;         # whether to delete .eps file with -b or -p
-@Libraries  = ();        # additional libraries to load
-$NoDefaults = 0;         # do not load default set of libraries
-$Charset    = "utf8";    # character encoding of input files
-$Debug      = 0;         # show some diagnostics while processing
-$KeepTemp   = 0;         # keep temporary latex files for debugging
-$Help       = 0;         # show help message?
+my $MakeBitmap = 0;         # whether to generate bitmap from .eps as well
+my $Scale      = 2;         # scaling factor for bitmap (default: 2)
+my $MakePDF    = 0;         # whether to generate .pdf from .eps as well
+my $Clean      = 0;         # whether to delete .eps file with -b or -p
+my @Libraries  = ();        # additional libraries to load
+my $NoDefaults = 0;         # do not load default set of libraries
+my $Charset    = "utf8";    # character encoding of input files
+my $Debug      = 0;         # show some diagnostics while processing
+my $KeepTemp   = 0;         # keep temporary latex files for debugging
+my $Help       = 0;         # show help message?
 
-$ok = GetOptions(
+my $ok = GetOptions(
     "bitmap|b"                      => \$MakeBitmap,
     "scale|s=i"                     => \$Scale,
     "pdf|p"                         => \$MakePDF,
@@ -64,28 +66,34 @@ in snippet to insert arbitrary latex commands into the preamble
 
 EOT
 
-$TempBase = "teximage.$$";    # basename for temporary files
+my $TempBase = "teximage.$$";    # basename for temporary files
 
-foreach $file (@ARGV) {
+our $HEADER;
+our $DEFAULTLIBS;
+our $BEGIN;
+our $FOOTER;
+
+foreach my $file (@ARGV) {
     print "Processing $file ... ";
-    ($base = $file) =~ s/\.tex$//;
-    $fh = new FileHandle $file
+    my $base = $file;
+    $base =~ s/\.tex$//;
+    my $fh = new FileHandle $file
       or die "Can't read file $file: $!";
 
     ## construct temporary latex file
-    $tf = new FileHandle "> $TempBase.tex"
-      or die "Can't create temporary file $tf: $!";
+    my $tf = new FileHandle "> $TempBase.tex"
+      or die "Can't create temporary file $TempBase.tex: $!";
     print $tf $HEADER;
     print $tf "\\usepackage[$Charset]{inputenc}\n";
     print $tf $DEFAULTLIBS unless $NoDefaults;
 
     if (@Libraries) {
         @Libraries = split /,/, join(",", @Libraries);
-        foreach $lib (@Libraries) {
+        foreach my $lib (@Libraries) {
             print $tf "\\usepackage{$lib}\n";
         }
     }
-    @BODY = ();    # collect lines for body
+    my @BODY = ();    # collect lines for body
     while (<$fh>) {
         if (s/^\%\%+pre\S*\s+//i) {    # %%PREAMBLE <commands>  ->  put into preamble
             print $tf $_;
@@ -98,7 +106,7 @@ foreach $file (@ARGV) {
     print $tf $_ for @BODY;
     print $tf $FOOTER;
 
-    $psfile = "$base.eps";
+    my $psfile = "$base.eps";
     if ($MakePDF) {
       ## run pdflatex on the temporary file -> pdf
       run_command("pdflatex $TempBase.tex");
