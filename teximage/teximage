@@ -32,7 +32,7 @@ $ok = GetOptions(
 );
 
 $Clean = 0
-  unless $MakePDF or $MakeBitmap;
+  unless $MakeBitmap;
 
 die <<'EOT' unless $ok and @ARGV > 0 and not $Help;
 
@@ -98,27 +98,32 @@ foreach $file (@ARGV) {
     print $tf $_ for @BODY;
     print $tf $FOOTER;
 
-    ## run latex on the temporary file -> dvi
-    run_command("latex $TempBase.tex");
-    print "dvi ";
-
-    ## run dvips to generate EPS file -> eps
-    run_command("dvips -E -o $base.eps $TempBase.dvi");
-    print(($Clean) ? "[eps] " : "eps ");
-
+    $psfile = "$base.eps";
     if ($MakePDF) {
-        ## run epstopdf to convert EPD to PDF
-        run_command("epstopdf $base.eps");
-        print "pdf ";
+      ## run pdflatex on the temporary file -> pdf
+      run_command("pdflatex $TempBase.tex");
+      run_command("pdfcrop $TempBase.pdf $base.pdf");
+      $psfile = "$base.pdf";
+      print(($Clean) ? "[pdf] " : "pdf ");
     }
+    else {
+      ## run latex on the temporary file -> dvi
+      run_command("latex $TempBase.tex");
+      print "dvi ";
+
+      ## run dvips to generate EPS file -> eps
+      run_command("dvips -E -o $base.eps $TempBase.dvi");
+      print(($Clean) ? "[eps] " : "eps ");
+    }
+    
     if ($MakeBitmap) {
-        ## run pstoimg to convert EPS to GIF or PNG
-        run_command("pstoimg -antialias -scale $Scale $base.eps");
+        ## run pstoimg to convert EPS to PNG
+        run_command("pstoimg -type png -antialias -aaliastext -scale $Scale $psfile");
         print "img ";
     }
 
     if ($Clean) {
-        unlink "$base.eps";
+        unlink $psfile;
     }
     print "\n";
     cleanup_files()
