@@ -73,7 +73,11 @@ if ($List) {
   die "Error: --list only takes a single hash or regular expression.\n" if @ARGV > 1;
   my $filter = (@ARGV) ? qr/^($ARGV[0])/ : undef;
   foreach my $h (sort keys %DB) {
-    my ($rname, $host, $dir, $url, $size, @files) = @{$DB{$h}};
+    my ($rname, $host, $dir, $url, $size, $date, @files) = @{$DB{$h}};
+    unless ($date =~ /^\d{4}-\d{2}-\d{2}/) {
+      unshift @files, $date; # compatibility with old entries before $date was included
+      $date = "";
+    }
     if ($filter) {
       next unless $h =~ $filter;
       print "$rname:\n";
@@ -81,6 +85,7 @@ if ($List) {
       print "\tdir:\t$dir\n";
       print "\turl:\t$url\n";
       printf "\tsize:\t%d (%.1f MB)\n", $size, $size / 1e6;
+      print "\tdate:\t$date\n";
       printf "\tfiles:\t%s\n", shift @files;
       foreach (@files) {
         print "\t\t$_\n";
@@ -89,7 +94,7 @@ if ($List) {
     }
     else {
       my $fileinfo = (@files > 1) ? sprintf "(%d files)", scalar @files : $files[0];
-      printf "%-70s  %6.1f MB  %s\n", $rname, $size / 1e6, $fileinfo;
+      printf "%-70s  %6.1f MB  %10s  %s\n", $rname, $size / 1e6, $date, $fileinfo;
     }
   }
   exit 0;
@@ -165,7 +170,9 @@ else {
   print "EXEC @$cmd\n" if $Debug;
   CWB::Shell::Cmd($cmd);
   print "Download URL: $RURL\n";
-  $DB{$Hash} = [$RName, $Host, $Dir, $RURL, -s $File, @Files];
+  my (undef, undef, undef, $d, $m, $y) = localtime();
+  my $date = sprintf "%04d-%02d-%02d", $y + 1900, $m, $d;
+  $DB{$Hash} = [$RName, $Host, $Dir, $RURL, -s $File, $date, @Files];
 }
 
 ## save database of transferred files (which should have been modified)
